@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# full-clone.sh — Clone Server A -> Server B with rsync (safe for SSH/password)
-# - Does NOT overwrite SSH/PAM/passwd or OS binaries on Server B
-# - Does NOT copy user ~/.ssh (so B keeps its original login method)
-# - Auth-aware connectivity probe (password or key)
+# full-clone.sh — Full rsync clone (same-architecture) with password login preserved
+# - Copies the whole system except networking/identity and /etc/ssh/*
+# - Optional: enforce PasswordAuthentication on destination after clone
 # - Optimized for >=1Gbps (no compression, whole-file, fast cipher)
 set -euo pipefail
 
-echo "=== Server Migration (rsync clone) ==="
+echo "=== Server Migration (rsync full clone: same-architecture) ==="
 
 # ---------- helpers ----------
 confirm_install() {
@@ -35,6 +34,8 @@ read -rp "Destination username (default: root): " DEST_USER
 DEST_USER=${DEST_USER:-root}
 read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS
 echo
+read -rp "After clone, enforce password login on destination? [Y/n]: " ENF
+ENF=${ENF:-Y}
 
 DEST="${DEST_USER}@${DEST_IP}"
 
@@ -59,17 +60,14 @@ trap cleanup_key EXIT
 
 # ---------- auth selection (password or key) ----------
 RSYNC_SSH=()
+AUTH_MODE="password"
 if [[ -n "${DEST_PASS}" ]]; then
-  # password mode
   confirm_install sshpass sshpass
   RSYNC_SSH=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS[@]}")
-  AUTH_MODE="password"
 else
-  # key mode
+  AUTH_MODE="key"
   read -rp "SSH private key path (default: ~/.ssh/id_ed25519): " KEY_PATH
   KEY_PATH=${KEY_PATH:-~/.ssh/id_ed25519}
-
-  # .ppk support (convert to OpenSSH)
   if [[ "${KEY_PATH}" == *.ppk ]]; then
     confirm_install putty-tools puttygen
     TMP_KEY_PATH="/root/rsync_key_$$"
@@ -78,17 +76,15 @@ else
     chmod 600 "${TMP_KEY_PATH}"
     KEY_PATH="${TMP_KEY_PATH}"
   fi
-
   if [[ ! -f "${KEY_PATH}" ]]; then
     echo "Error: SSH key not found at '${KEY_PATH}'."
     exit 1
   fi
   chmod 600 "${KEY_PATH}" || true
   RSYNC_SSH=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS[@]}")
-  AUTH_MODE="key"
 fi
 
-# ---------- refresh known_hosts for DEST_IP to avoid stale host-key errors ----------
+# ---------- avoid stale known_hosts host key ----------
 ssh-keygen -R "${DEST_IP}" >/dev/null 2>&1 || true
 ssh-keyscan -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -110,8 +106,8 @@ else
   fi
 fi
 
-echo "=== Starting rsync clone to ${DEST} ==="
-echo "This will copy data/configs and SKIP OS binaries, networking, login-related files, and users' SSH keys."
+echo "=== Starting rsync full clone to ${DEST} ==="
+echo "Copies almost everything, but keeps destination networking/identity and SSH server config."
 echo "Source: /   ->   Destination: ${DEST}:/"
 echo
 
@@ -125,8 +121,7 @@ RSYNC_BASE_OPTS=(
   "--info=stats2,progress2"
 )
 
-# ---------- Excludes ----------
-# Keep destination OS, login, and users' SSH keys intact
+# ---------- Excludes (minimal; keep B's network/identity and SSH server config) ----------
 EXCLUDES=(
   # runtime and mounts
   --exclude=/dev/*
@@ -139,25 +134,7 @@ EXCLUDES=(
   --exclude=/lost+found
   --exclude=/swapfile
 
-  # kernel/boot
-  --exclude=/boot/*
-  --exclude=/lib/modules/*
-  --exclude=/lib/firmware/*
-
-  # DO NOT overwrite destination OS binaries/libraries
-  --exclude=/bin/*
-  --exclude=/sbin/*
-  --exclude=/usr/*
-  --exclude=/lib/*
-  --exclude=/lib64/*
-  --exclude=/lib32/*
-
-  # caches/noise
-  --exclude=/var/cache/*
-  --exclude=/var/tmp/*
-  --exclude=/var/log/journal/*
-
-  # KEEP B's network & identity
+  # keep destination’s own networking & identity
   --exclude=/etc/network/*
   --exclude=/etc/netplan/*
   --exclude=/etc/hostname
@@ -169,16 +146,8 @@ EXCLUDES=(
   --exclude=/etc/machine-id
   --exclude=/var/lib/dbus/machine-id
 
-  # KEEP B's SSH + login intact
+  # keep destination’s SSH *server* config & host keys
   --exclude=/etc/ssh/*
-  --exclude=/etc/pam.d/*
-  --exclude=/etc/passwd
-  --exclude=/etc/shadow
-  --exclude=/etc/group
-
-  # KEEP B's existing user SSH keys
-  --exclude=/root/.ssh/*
-  --exclude=/home/*/.ssh/*
 )
 
 # ---------- run rsync ----------
@@ -187,6 +156,28 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   / "${DEST}":/
 
 echo
-echo "=== Migration complete. ==="
-echo "Tip: reboot the destination (${DEST_IP}) and verify services:"
+echo "=== Clone complete. ==="
+
+# ---------- optionally enforce password login on destination ----------
+if [[ "${ENF}" =~ ^[Yy]$ ]]; then
+  echo "=== Enforcing password login on destination (safe override) ==="
+  # Create drop-in override without touching existing files
+  ENFORCE_CMD=$'set -e\n'\
+'install -d -m 0755 /etc/ssh/sshd_config.d\n'\
+'printf "PasswordAuthentication yes\\nKbdInteractiveAuthentication yes\\nUsePAM yes\\nPermitRootLogin yes\\nAuthorizedKeysFile .ssh/authorized_keys\\n" > /etc/ssh/sshd_config.d/90-password-override.conf\n'\
+'sshd -t\n'\
+'systemctl restart ssh || systemctl restart sshd || true\n'\
+'echo "Password login override applied."'
+  if [[ "${AUTH_MODE}" == "password" ]]; then
+    sshpass -p "${DEST_PASS}" ssh -o StrictHostKeyChecking=accept-new "${DEST}" "${ENFORCE_CMD}"
+  else
+    "${RSYNC_SSH[@]}" "${DEST}" "${ENFORCE_CMD}"
+  fi
+  echo "✓ Destination configured to allow password login."
+else
+  echo "Skipping password login enforcement as requested."
+fi
+
+echo
+echo "Done. You can now reboot ${DEST_IP} and verify services:"
 echo "  docker ps   |   systemctl status mysql mariadb docker nginx"
