@@ -20,7 +20,7 @@ RSYNC_BASE_OPTS=(
   --delete
   --whole-file
   --delay-updates
-  --info=stats2,progress2
+  "--info=stats2,progress2"
 )
 
 SSH_OPTS=(
