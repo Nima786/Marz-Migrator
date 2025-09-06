@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # full-clone.sh — Clone Server A -> Server B with rsync (safe for SSH/password)
 # - Does NOT overwrite SSH/PAM/passwd or OS binaries on Server B
+# - Does NOT copy user ~/.ssh (so B keeps its original login method)
 # - Auth-aware connectivity probe (password or key)
 # - Optimized for >=1Gbps (no compression, whole-file, fast cipher)
 set -euo pipefail
@@ -110,7 +111,7 @@ else
 fi
 
 echo "=== Starting rsync clone to ${DEST} ==="
-echo "This will copy data/configs and SKIP OS binaries, networking and login-related files."
+echo "This will copy data/configs and SKIP OS binaries, networking, login-related files, and users' SSH keys."
 echo "Source: /   ->   Destination: ${DEST}:/"
 echo
 
@@ -125,7 +126,7 @@ RSYNC_BASE_OPTS=(
 )
 
 # ---------- Excludes ----------
-# Keep destination OS & login intact (prevents breaking SSH/password, PAM, provider password reset)
+# Keep destination OS, login, and users' SSH keys intact
 EXCLUDES=(
   # runtime and mounts
   --exclude=/dev/*
@@ -174,6 +175,10 @@ EXCLUDES=(
   --exclude=/etc/passwd
   --exclude=/etc/shadow
   --exclude=/etc/group
+
+  # KEEP B's existing user SSH keys
+  --exclude=/root/.ssh/*
+  --exclude=/home/*/.ssh/*
 )
 
 # ---------- run rsync ----------
