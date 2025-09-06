@@ -16,11 +16,24 @@ DEST_USER=${DEST_USER:-root}
 read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS
 echo
 
-SSH_OPTS=(-T -x -o Compression=no -o TCPKeepAlive=yes -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com)
-RSYNC_SSH=()  # we just use it as a generic SSH runner
+SSH_OPTS=(
+  -T
+  -x
+  -o Compression=no
+  -o TCPKeepAlive=yes
+  -o ServerAliveInterval=30
+  -o StrictHostKeyChecking=accept-new
+  -c aes128-gcm@openssh.com
+)
+
+RSYNC_SSH=()  # generic SSH runner
 TMP_KEY_PATH=""
 
-cleanup_key(){ [[ -n "${TMP_KEY_PATH}" && -f "${TMP_KEY_PATH}" ]] && shred -u "${TMP_KEY_PATH}" 2>/dev/null || true; }
+cleanup_key(){
+  if [[ -n "${TMP_KEY_PATH}" && -f "${TMP_KEY_PATH}" ]]; then
+    shred -u "${TMP_KEY_PATH}" 2>/dev/null || true
+  fi
+}
 trap cleanup_key EXIT
 
 if [[ -n "${DEST_PASS}" ]]; then
@@ -58,13 +71,19 @@ if "${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true 2>/dev/
 else
   warn "SSH reachability check failed or needs interaction; continuing..."
 fi
-HOST_INFO=$("${RSYNC_SSH[@]}" "${DEST}" 'echo -n "$(hostnamectl --static 2>/dev/null || hostname) | "; uname -r 2>/dev/null || true' || true)
+# Use double quotes so shellcheck is happy; expansions happen on the remote.
+HOST_INFO=$("${RSYNC_SSH[@]}" "${DEST}" "echo -n \"\$(hostnamectl --static 2>/dev/null || hostname) | \"; uname -r 2>/dev/null || true" || true)
 echo "Server B: ${HOST_INFO}"
 
 echo
 echo "${CYA}${BLD}2) Systemd health on Server B${RST}"
 FAILED=$("${RSYNC_SSH[@]}" "${DEST}" 'systemctl --failed --no-legend 2>/dev/null | wc -l' || echo "0")
-if [[ "${FAILED}" == "0" ]]; then ok "No failed systemd units."; else warn "${FAILED} failed unit(s) found:"; "${RSYNC_SSH[@]}" "${DEST}" 'systemctl --failed --no-pager || true'; fi
+if [[ "${FAILED}" == "0" ]]; then
+  ok "No failed systemd units."
+else
+  warn "${FAILED} failed unit(s) found:"
+  "${RSYNC_SSH[@]}" "${DEST}" 'systemctl --failed --no-pager || true'
+fi
 
 echo
 echo "${CYA}${BLD}3) Common services on Server B${RST}"
@@ -84,8 +103,16 @@ else
   warn "mysql client not found (skipping DB list)."
 fi
 # Web servers
-if "${RSYNC_SSH[@]}" "${DEST}" 'systemctl is-active nginx >/dev/null 2>&1'; then ok "nginx is active."; else "${RSYNC_SSH[@]}" "${DEST}" 'systemctl status nginx 2>/dev/null | sed -n "1,5p" || true'; fi
-if "${RSYNC_SSH[@]}" "${DEST}" 'systemctl is-active apache2 >/dev/null 2>&1'; then ok "apache2 is active."; else "${RSYNC_SSH[@]}" "${DEST}" 'systemctl status apache2 2>/dev/null | sed -n "1,5p" || true'; fi
+if "${RSYNC_SSH[@]}" "${DEST}" 'systemctl is-active nginx >/dev/null 2>&1'; then
+  ok "nginx is active."
+else
+  "${RSYNC_SSH[@]}" "${DEST}" 'systemctl status nginx 2>/dev/null | sed -n "1,5p" || true'
+fi
+if "${RSYNC_SSH[@]}" "${DEST}" 'systemctl is-active apache2 >/dev/null 2>&1'; then
+  ok "apache2 is active."
+else
+  "${RSYNC_SSH[@]}" "${DEST}" 'systemctl status apache2 2>/dev/null | sed -n "1,5p" || true'
+fi
 
 echo
 echo "${CYA}${BLD}4) Cross-check directory sizes (A vs B)${RST}"
@@ -98,13 +125,9 @@ for d in "${DIRS[@]}"; do
     printf "%-20s %15s %15s %9s\n" "$d" "-" "-" "-"
     continue
   fi
-  # percent diff relative to A (avoid div-by-zero)
   if [[ "$SA" -gt 0 ]]; then
-    DIFF=$(( SB - SA ))
-    # compute percent with awk for decimals
     PCT=$(awk -v a="$SA" -v b="$SB" 'BEGIN{ if(a==0){print 0}else{printf "%.1f", ((b-a)/a)*100} }')
   else
-    DIFF=$SB
     PCT="∞"
   fi
   printf "%-20s %15s %15s %9s\n" "$d" "$SA" "$SB" "$PCT"
@@ -121,12 +144,12 @@ for b in "${BINARIES[@]}"; do
   fi
   B_MD5=$("${RSYNC_SSH[@]}" "${DEST}" "md5sum $b 2>/dev/null | awk '{print \$1}'" || true)
   [[ -z "$B_MD5" ]] && B_MD5="NA"
-  printf "%-20s  A:%-34s  B:%-34s  %s\n" "$b" "$A_MD5" "$B_MD5" "$( [[ "$A_MD5" == "$B_MD5" && "$A_MD5" != "NA" ]] && echo "${GRN}match${RST}" || echo "${YLW}check${RST}" )"
+  STATUS=$([[ "$A_MD5" == "$B_MD5" && "$A_MD5" != "NA" ]] && echo "${GRN}match${RST}" || echo "${YLW}check${RST}")
+  printf "%-20s  A:%-34s  B:%-34s  %s\n" "$b" "$A_MD5" "$B_MD5" "$STATUS"
 done
 
 echo
 echo "${CYA}${BLD}6) Kernel & reboot advice${RST}"
-# If modules/boot were excluded (as in clone script), kernel may differ; that's okay.
 "${RSYNC_SSH[@]}" "${DEST}" 'echo -n "Kernel: "; uname -r'
 echo "If services look good, update DNS or clients to Server B’s IP."
 echo
