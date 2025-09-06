@@ -1,51 +1,42 @@
 #!/usr/bin/env bash
 # full-clone.sh — Clone Server A -> Server B with rsync
-# Optimized for >=1Gbps, supports SSH key or password
+# Safe for login: DOES NOT overwrite SSH/PAM/passwd files on Server B.
+# Optimized for >=1Gbps links (no compression, whole-file, fast cipher).
 set -euo pipefail
 
 echo "=== Server Migration (rsync clone) ==="
 
-check_and_install() {
-  local pkg="$1"
-  local bin="$2"
-
+# ---------- helpers ----------
+confirm_install() {
+  # confirm_install <apt-package> <bin>
+  local pkg="$1" bin="$2"
   if ! command -v "$bin" >/dev/null 2>&1; then
-    echo "Package '$pkg' (providing '$bin') is not installed."
-    read -rp "Do you want to install it now? [Y/n]: " ans
-    ans=${ans:-Y}
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
-      apt update && apt install -y "$pkg"
+    read -rp "Package '$pkg' (for '$bin') is missing. Install it now? [Y/n]: " _ans
+    _ans=${_ans:-Y}
+    if [[ "$_ans" =~ ^[Yy]$ ]]; then
+      apt-get update && apt-get install -y "$pkg"
     else
-      echo "Cannot continue without $pkg. Exiting."
+      echo "Cannot continue without '$pkg'. Exiting."
       exit 1
     fi
   fi
 }
 
+# ---------- required tools on Source (A) ----------
 echo "=== Checking required packages on Source Server (Server A) ==="
-check_and_install rsync rsync
-check_and_install openssh-client ssh
-check_and_install sshpass sshpass   # optional, only needed if using password mode
-check_and_install putty-tools puttygen   # only needed if using .ppk keys
+confirm_install rsync rsync
+confirm_install openssh-client ssh
 
+# ---------- gather inputs ----------
 read -rp "Destination server IP: " DEST_IP
 read -rp "Destination username (default: root): " DEST_USER
 DEST_USER=${DEST_USER:-root}
-
-# Ask for password first. If provided -> password mode. If empty -> key mode.
 read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS
 echo
 
-# Common rsync + ssh options (note: NO commas between elements)
-RSYNC_BASE_OPTS=(
-  -aAXH
-  --numeric-ids
-  --delete
-  --whole-file
-  --delay-updates
-  "--info=stats2,progress2"
-)
+DEST="${DEST_USER}@${DEST_IP}"
 
+# ---------- SSH options ----------
 SSH_OPTS=(
   -T
   -x
@@ -56,8 +47,85 @@ SSH_OPTS=(
   -c aes128-gcm@openssh.com
 )
 
-# Excludes: keep B's network/identity & skip junk
+TMP_KEY_PATH=""
+cleanup_key() {
+  if [[ -n "${TMP_KEY_PATH}" && -f "${TMP_KEY_PATH}" ]]; then
+    shred -u "${TMP_KEY_PATH}" 2>/dev/null || true
+  fi
+}
+trap cleanup_key EXIT
+
+# ---------- auth selection (password or key) ----------
+RSYNC_SSH=()
+if [[ -n "${DEST_PASS}" ]]; then
+  # password mode
+  confirm_install sshpass sshpass
+  RSYNC_SSH=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS[@]}")
+  AUTH_MODE="password"
+else
+  # key mode
+  read -rp "SSH private key path (default: ~/.ssh/id_ed25519): " KEY_PATH
+  KEY_PATH=${KEY_PATH:-~/.ssh/id_ed25519}
+
+  # .ppk support (convert to OpenSSH)
+  if [[ "${KEY_PATH}" == *.ppk ]]; then
+    confirm_install putty-tools puttygen
+    TMP_KEY_PATH="/root/rsync_key_$$"
+    echo "Converting PPK -> OpenSSH key with puttygen..."
+    puttygen "${KEY_PATH}" -O private-openssh -o "${TMP_KEY_PATH}"
+    chmod 600 "${TMP_KEY_PATH}"
+    KEY_PATH="${TMP_KEY_PATH}"
+  fi
+
+  if [[ ! -f "${KEY_PATH}" ]]; then
+    echo "Error: SSH key not found at '${KEY_PATH}'."
+    exit 1
+  fi
+  chmod 600 "${KEY_PATH}" || true
+  RSYNC_SSH=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS[@]}")
+  AUTH_MODE="key"
+fi
+
+# ---------- nicety: refresh known_hosts for DEST_IP to avoid stale host-key errors ----------
+ssh-keygen -R "${DEST_IP}" >/dev/null 2>&1 || true
+ssh-keyscan -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+# ---------- friendly connectivity check (auth-aware) ----------
+echo "=== Checking connectivity to ${DEST} ==="
+if [[ "${AUTH_MODE}" == "password" ]]; then
+  if sshpass -p "${DEST_PASS}" ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "${DEST}" "echo ok" 2>/dev/null | grep -q ok; then
+    echo "✓ SSH reachable with password."
+  else
+    echo "✗ Could not log in with the provided password. Aborting."
+    exit 1
+  fi
+else
+  if "${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true >/dev/null 2>&1; then
+    echo "✓ SSH reachable with key."
+  else
+    echo "✗ SSH key login failed (non-interactive). Aborting."
+    exit 1
+  fi
+fi
+
+echo "=== Starting rsync clone to ${DEST} ==="
+echo "This will copy the entire filesystem except networking/identity/boot and login-related files."
+echo "Source: /   ->   Destination: ${DEST}:/"
+echo
+
+# ---------- rsync options ----------
+RSYNC_BASE_OPTS=(
+  -aAXH
+  --numeric-ids
+  --delete
+  --whole-file
+  --delay-updates
+  "--info=stats2,progress2"
+)
+
+# ---------- Excludes (DO NOT TOUCH login/SSH on B) ----------
 EXCLUDES=(
+  # runtime and mounts
   --exclude=/dev/*
   --exclude=/proc/*
   --exclude=/sys/*
@@ -66,14 +134,19 @@ EXCLUDES=(
   --exclude=/mnt/*
   --exclude=/media/*
   --exclude=/lost+found
+  --exclude=/swapfile
+
+  # kernel/boot (we're not replacing kernels/bootloader)
   --exclude=/boot/*
   --exclude=/lib/modules/*
   --exclude=/lib/firmware/*
-  --exclude=/swapfile
-  --exclude=/var/cache/apt/archives/*
-  --exclude=/var/cache/man/*
+
+  # caches/noise
+  --exclude=/var/cache/*
   --exclude=/var/tmp/*
   --exclude=/var/log/journal/*
+
+  # KEEP B's network & identity
   --exclude=/etc/network/*
   --exclude=/etc/netplan/*
   --exclude=/etc/hostname
@@ -84,75 +157,21 @@ EXCLUDES=(
   --exclude=/var/lib/cloud/*
   --exclude=/etc/machine-id
   --exclude=/var/lib/dbus/machine-id
-  --exclude=/etc/ssh/ssh_host_*
+
+  # *** CRITICAL: KEEP B's SSH + login intact ***
+  --exclude=/etc/ssh/*
+  --exclude=/etc/pam.d/*
+  --exclude=/etc/passwd
+  --exclude=/etc/shadow
+  --exclude=/etc/group
 )
 
-DEST="${DEST_USER}@${DEST_IP}"
-
-cleanup_key() {
-  if [[ -n "${TMP_KEY_PATH:-}" && -f "${TMP_KEY_PATH}" ]]; then
-    shred -u "${TMP_KEY_PATH}" 2>/dev/null || true
-  fi
-}
-trap cleanup_key EXIT
-
-build_ssh_cmd() {
-  # Build RSYNC_SSH array into global var
-  if [[ -n "${DEST_PASS}" ]]; then
-    if command -v sshpass >/dev/null 2>&1; then
-      RSYNC_SSH=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS[@]}")
-    else
-      echo "Note: sshpass not found. rsync/ssh may prompt interactively for the password."
-      RSYNC_SSH=(ssh "${SSH_OPTS[@]}")
-    fi
-  else
-    # Key-based auth
-    read -rp "SSH private key path (default: ~/.ssh/id_ed25519): " KEY_PATH
-    KEY_PATH=${KEY_PATH:-~/.ssh/id_ed25519}
-
-    # If a .ppk is provided, try to convert it (requires puttygen)
-    if [[ "${KEY_PATH}" == *.ppk ]]; then
-      if command -v puttygen >/dev/null 2>&1; then
-        TMP_KEY_PATH="/root/rsync_key_$$"
-        echo "Converting PPK -> OpenSSH key with puttygen..."
-        puttygen "${KEY_PATH}" -O private-openssh -o "${TMP_KEY_PATH}"
-        chmod 600 "${TMP_KEY_PATH}"
-        KEY_PATH="${TMP_KEY_PATH}"
-      else
-        echo "Error: '${KEY_PATH}' is a .ppk file and puttygen is not installed."
-        echo "Install it with:  apt update && apt install -y putty-tools"
-        exit 1
-      fi
-    fi
-
-    if [[ ! -f "${KEY_PATH}" ]]; then
-      echo "Error: SSH key not found at '${KEY_PATH}'."
-      exit 1
-    fi
-    chmod 600 "${KEY_PATH}" || true
-    RSYNC_SSH=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS[@]}")
-  fi
-}
-
-# Build SSH command based on auth choice
-build_ssh_cmd
-
-echo "=== Starting rsync clone to ${DEST} ==="
-echo "This will copy the entire filesystem except networking/identity/boot junk."
-echo "Source: /   ->   Destination: ${DEST}:/"
-echo
-
-# Optional reachability probe (non-fatal)
-if ! "${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true >/dev/null 2>&1; then
-  echo "Warning: quick SSH reachability check failed or requires interaction; proceeding with rsync..."
-fi
-
-# Run rsync (no --inplace; uses --delay-updates to avoid 'Text file busy')
+# ---------- run rsync ----------
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
 echo
 echo "=== Migration complete. ==="
-echo "You can now reboot the destination (${DEST_IP}) and verify services:"
+echo "Tip: reboot the destination (${DEST_IP}) and verify services:"
 echo "  docker ps   |   systemctl status mysql mariadb docker nginx"
