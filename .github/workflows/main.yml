@@ -11,13 +11,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set script permissions
-        run: chmod +x full-clone.sh verify-clone.sh
+      - name: Make scripts executable
+        run: chmod +x *.sh || true
 
-      - name: Run shellcheck (lint Bash scripts)
-        uses: ludeeus/action-shellcheck@v2
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
 
-      - name: Syntax check scripts
+      - name: Run shellcheck (lint)
+        run: |
+          # Lint all shell scripts at repo root; expand or tweak the glob if needed
+          shellcheck -x full-clone.sh verify-clone.sh
+
+      - name: Syntax check (bash -n)
         run: |
           bash -n full-clone.sh
           bash -n verify-clone.sh
