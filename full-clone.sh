@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # full-clone.sh — Clone Server A -> Server B with rsync
-# Safe: reads from this server (A), writes to destination (B).
-# Tuned for >=1Gbps links (no compression, whole-file, fast cipher).
+# Optimized for >=1Gbps, supports SSH key or password
 set -euo pipefail
 
 echo "=== Server Migration (rsync clone) ==="
@@ -23,7 +22,10 @@ RSYNC_BASE_OPTS=(
   --delay-updates
   --info=stats2,progress2
 )
-SSH_OPTS=(-T -x
+
+SSH_OPTS=(
+  -T
+  -x
   -o Compression=no
   -o TCPKeepAlive=yes
   -o ServerAliveInterval=30
@@ -65,7 +67,9 @@ EXCLUDES=(
 DEST="${DEST_USER}@${DEST_IP}"
 
 cleanup_key() {
-  [[ -n "${TMP_KEY_PATH:-}" && -f "${TMP_KEY_PATH}" ]] && shred -u "${TMP_KEY_PATH}" 2>/dev/null || true
+  if [[ -n "${TMP_KEY_PATH:-}" && -f "${TMP_KEY_PATH}" ]]; then
+    shred -u "${TMP_KEY_PATH}" 2>/dev/null || true
+  fi
 }
 trap cleanup_key EXIT
 
@@ -116,12 +120,9 @@ echo "Source: /   ->   Destination: ${DEST}:/"
 echo
 
 # Optional reachability probe (non-fatal)
-set +e
-"${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true >/dev/null 2>&1
-if [[ $? -ne 0 ]]; then
+if ! "${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true >/dev/null 2>&1; then
   echo "Warning: quick SSH reachability check failed or requires interaction; proceeding with rsync..."
 fi
-set -e
 
 # Run rsync (no --inplace; uses --delay-updates to avoid 'Text file busy')
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
