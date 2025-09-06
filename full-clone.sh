@@ -5,6 +5,29 @@ set -euo pipefail
 
 echo "=== Server Migration (rsync clone) ==="
 
+check_and_install() {
+  local pkg="$1"
+  local bin="$2"
+
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "Package '$pkg' (providing '$bin') is not installed."
+    read -rp "Do you want to install it now? [Y/n]: " ans
+    ans=${ans:-Y}
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      apt update && apt install -y "$pkg"
+    else
+      echo "Cannot continue without $pkg. Exiting."
+      exit 1
+    fi
+  fi
+}
+
+echo "=== Checking required packages on Source Server (Server A) ==="
+check_and_install rsync rsync
+check_and_install openssh-client ssh
+check_and_install sshpass sshpass   # optional, only needed if using password mode
+check_and_install putty-tools puttygen   # only needed if using .ppk keys
+
 read -rp "Destination server IP: " DEST_IP
 read -rp "Destination username (default: root): " DEST_USER
 DEST_USER=${DEST_USER:-root}
