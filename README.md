@@ -11,6 +11,12 @@ It supports **SSH key or password authentication**, automatically handles `.ppk`
 - Includes **verify script** to check if Server B is healthy after migration.
 - Supports `.ppk` keys (auto-converts to OpenSSH format if `puttygen` is installed).
 
+⚠️ Disclaimer
+-------------
+
+This script directly clones one server onto another using `rsync`. While it has been tested, **always create a full backup of your source server** before running it. If anything goes wrong (network issues, hardware failure, or user mistakes), you can lose data without a backup.
+
+Use this tool at your own risk — double-check that you have recovery options before proceeding.
 ## 🚀 Quick Start
 Run this on **Server A** (the source server):
 
@@ -39,6 +45,43 @@ Install requirements:
 ```bash
 apt update && apt install -y rsync putty-tools sshpass
 ```
+📖 How to use this script
+-------------------------
+
+1.  **Prepare your servers**
+    *   Make sure you can SSH into both Server A (source) and Server B (destination).
+    *   If you use SSH keys:
+        *   Upload **Server B’s private key** file (e.g. `private-key.ppk` or `id_ed25519`) into the **root directory of Server A**.
+        *   This allows the script to authenticate to Server B during the clone.
+2.  **On Server A (the source server)**, run the clone script:
+    
+        bash <(curl -s https://raw.githubusercontent.com/Nima786/server-clone-rsync/main/full-clone.sh)
+    
+3.  The script will ask for:
+    *   Destination server **IP**
+    *   Destination **username** (default: `root`)
+    *   Either:
+        *   **Password** (if you use password auth), or
+        *   Leave blank → provide the path to the **SSH private key** you uploaded (e.g. `/root/private-key.ppk`)
+4.  The script will then **rsync all data from Server A → Server B**, while skipping:
+    *   Networking configs (to keep B’s IP/hostname working)
+    *   Machine identity files
+    *   Temporary/system files
+5.  After it finishes, verify the migration by running:
+    
+        bash <(curl -s https://raw.githubusercontent.com/Nima786/server-clone-rsync/main/verify-clone.sh)
+    
+    This will check:
+    
+    *   SSH reachability
+    *   Systemd health
+    *   Docker, MySQL/MariaDB, Nginx/Apache status
+    *   Directory sizes between A and B
+    *   Spot-check hashes of a few binaries
+6.  Once verified:
+    *   Test apps on Server B (open its IP in browser / check services).
+    *   Update DNS (or client configs) to point to Server B’s IP.
+    *   Keep Server A as fallback for a few days, then retire it safely.
 
 ## ⚠️ Notes
 - This tool is designed for **same-architecture clones (x86→x86, arm→arm)**.  
