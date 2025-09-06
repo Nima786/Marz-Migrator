@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set script permissions
+        run: chmod +x full-clone.sh verify-clone.sh
+
+      - name: Run shellcheck (lint Bash scripts)
+        uses: ludeeus/action-shellcheck@v2
+
+      - name: Syntax check scripts
+        run: |
+          bash -n full-clone.sh
+          bash -n verify-clone.sh
