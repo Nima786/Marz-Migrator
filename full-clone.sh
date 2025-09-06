@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# full-clone.sh — Clone Server A -> Server B with rsync
-# Safe for login: DOES NOT overwrite SSH/PAM/passwd files on Server B.
-# Optimized for >=1Gbps links (no compression, whole-file, fast cipher).
+# full-clone.sh — Clone Server A -> Server B with rsync (safe for SSH/password)
+# - Does NOT overwrite SSH/PAM/passwd or OS binaries on Server B
+# - Auth-aware connectivity probe (password or key)
+# - Optimized for >=1Gbps (no compression, whole-file, fast cipher)
 set -euo pipefail
 
 echo "=== Server Migration (rsync clone) ==="
@@ -86,7 +87,7 @@ else
   AUTH_MODE="key"
 fi
 
-# ---------- nicety: refresh known_hosts for DEST_IP to avoid stale host-key errors ----------
+# ---------- refresh known_hosts for DEST_IP to avoid stale host-key errors ----------
 ssh-keygen -R "${DEST_IP}" >/dev/null 2>&1 || true
 ssh-keyscan -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -109,7 +110,7 @@ else
 fi
 
 echo "=== Starting rsync clone to ${DEST} ==="
-echo "This will copy the entire filesystem except networking/identity/boot and login-related files."
+echo "This will copy data/configs and SKIP OS binaries, networking and login-related files."
 echo "Source: /   ->   Destination: ${DEST}:/"
 echo
 
@@ -123,7 +124,8 @@ RSYNC_BASE_OPTS=(
   "--info=stats2,progress2"
 )
 
-# ---------- Excludes (DO NOT TOUCH login/SSH on B) ----------
+# ---------- Excludes ----------
+# Keep destination OS & login intact (prevents breaking SSH/password, PAM, provider password reset)
 EXCLUDES=(
   # runtime and mounts
   --exclude=/dev/*
@@ -136,10 +138,18 @@ EXCLUDES=(
   --exclude=/lost+found
   --exclude=/swapfile
 
-  # kernel/boot (we're not replacing kernels/bootloader)
+  # kernel/boot
   --exclude=/boot/*
   --exclude=/lib/modules/*
   --exclude=/lib/firmware/*
+
+  # DO NOT overwrite destination OS binaries/libraries
+  --exclude=/bin/*
+  --exclude=/sbin/*
+  --exclude=/usr/*
+  --exclude=/lib/*
+  --exclude=/lib64/*
+  --exclude=/lib32/*
 
   # caches/noise
   --exclude=/var/cache/*
@@ -158,7 +168,7 @@ EXCLUDES=(
   --exclude=/etc/machine-id
   --exclude=/var/lib/dbus/machine-id
 
-  # *** CRITICAL: KEEP B's SSH + login intact ***
+  # KEEP B's SSH + login intact
   --exclude=/etc/ssh/*
   --exclude=/etc/pam.d/*
   --exclude=/etc/passwd
