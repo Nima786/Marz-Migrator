@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# full-clone.sh — Full rsync clone (same-arch) with AUTH-SAFE excludes
-# - Copies the whole system except runtime mounts, network identity, SSH server config,
-#   and AUTH files (so destination login stays exactly as the provider set it)
+# full-clone.sh — Versatile rsync clone (same-arch) with AUTH-SAFE excludes
+# - Supports both "Safe Mode" (firewall excluded) and "Expert Mode" (firewall cloned).
+# - Handles CyberPanel/LiteSpeed license migration by excluding the key.
 # - Supports password OR SSH key (auto-convert .ppk to OpenSSH)
 # - ShellCheck-friendly
 set -euo pipefail
@@ -102,10 +102,52 @@ else
   fi
 fi
 
-# --- Pre-emptive Target Server Safeguards ---
-echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
-"${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw || true"
-echo "✓ Firewall services (firewalld, ufw) disabled on destination to prevent lockout."
+# ---- Base Excludes (always active) ----
+EXCLUDES=(
+  # runtime/mounts
+  --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
+  # boot (provider manages kernel/bootloader)
+  --exclude=/boot/**
+  # keep destination network & identity
+  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
+  --exclude=/etc/cloud/** --exclude=/var/lib/cloud/** --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
+  # keep destination SSH server fully intact to prevent lockout
+  --exclude=/etc/ssh/**
+  --exclude=/lib/systemd/system/ssh.service
+  # Exclude LiteSpeed Enterprise license to allow re-registration
+  --exclude=/usr/local/lsws/conf/serial.no
+  # keep destination AUTH intact
+  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
+  --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
+  # noise
+  --exclude=/var/cache/** --exclude=/var/tmp/** --exclude=/var/log/journal/**
+)
+
+# ---- INTERACTIVE: Firewall Migration Choice ----
+read -rp "Clone firewall configuration (ufw, nftables, etc.)? [y/N]: " CLONE_FIREWALL
+CLONE_FIREWALL=${CLONE_FIREWALL:-N}
+
+if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
+  echo "--- Safe Mode: Firewall will NOT be cloned. ---"
+  # Apply pre-clone safeguard on destination
+  echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
+  "${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw nftables || true"
+  echo "✓ Firewall services disabled on destination to prevent lockout."
+  
+  # Add firewall paths to the excludes list
+  EXCLUDES+=(
+    --exclude=/etc/ufw/** 
+    --exclude=/var/lib/ufw/** 
+    --exclude=/etc/iptables* 
+    --exclude=/etc/nftables.conf 
+    --exclude=/etc/firewalld/** 
+    --exclude=/etc/fail2ban/**
+  )
+else
+  echo "--- Expert Mode: Firewall WILL be cloned. ---"
+  echo "WARNING: Ensure firewall rules are not IP-specific to avoid lockout."
+fi
+
 
 echo "=== Starting rsync full clone to ${DEST} ==="
 
@@ -118,35 +160,13 @@ RSYNC_BASE_OPTS=(
   "--info=stats2,progress2"
 )
 
-# ---- Excludes (auth-safe) - FINAL ----
-EXCLUDES=(
-  # runtime/mounts
-  --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
-  # boot (provider manages kernel/bootloader)
-  --exclude=/boot/**
-  # keep destination network & identity
-  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
-  --exclude=/etc/cloud/** --exclude=/var/lib/cloud/** --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-
-  # === CRITICAL: Keep destination SSH server fully intact to prevent lockout ===
-  --exclude=/etc/ssh/**
-  # --- NEW FIX: Protect the systemd service file for SSH ---
-  --exclude=/lib/systemd/system/ssh.service
-
-  # 🔒 keep destination AUTH intact (so provider password/key keep working)
-  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
-  --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
-
-  # optional: avoid copying firewall state (prevents lockout)
-  --exclude=/etc/ufw/** --exclude=/var/lib/ufw/** --exclude=/etc/iptables* --exclude=/etc/nftables.conf --exclude=/etc/firewalld/** --exclude=/etc/fail2ban/**
-  # noise
-  --exclude=/var/cache/** --exclude=/var/tmp/** --exclude=/var/log/journal/**
-)
-
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
 echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
 echo "Login on B stays unchanged (provider creds/keys remain). Apps/data/configs are cloned."
-echo "IMPORTANT: The firewall on Server B has been disabled. Log in and configure it immediately."
+
+if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
+  echo "IMPORTANT: The firewall on Server B has been disabled. Log in and configure it."
+fi
