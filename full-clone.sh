@@ -104,47 +104,4 @@ fi
 
 # --- Pre-emptive Target Server Safeguards ---
 echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
-"${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw || true"
-echo "✓ Firewall services (firewalld, ufw) disabled on destination to prevent lockout."
-
-echo "=== Starting rsync full clone to ${DEST} ==="
-
-RSYNC_BASE_OPTS=(
-  -aAXH
-  --numeric-ids
-  --delete
-  --whole-file
-  --delay-updates
-  "--info=stats2,progress2"
-)
-
-# ---- Excludes (auth-safe) - REVISED ----
-EXCLUDES=(
-  # runtime/mounts
-  --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
-  # boot (provider manages kernel/bootloader)
-  --exclude=/boot/**
-  # keep destination network & identity
-  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
-  --exclude=/etc/cloud/** --exclude=/var/lib/cloud/** --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-  
-  # === CRITICAL: Keep destination SSH server fully intact to prevent lockout ===
-  --exclude=/etc/ssh/**
-  
-  # 🔒 keep destination AUTH intact (so provider password/key keep working)
-  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
-  --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
-  
-  # optional: avoid copying firewall state (prevents lockout)
-  --exclude=/etc/ufw/** --exclude=/var/lib/ufw/** --exclude=/etc/iptables* --exclude=/etc/nftables.conf --exclude=/etc/firewalld/** --exclude=/etc/fail2ban/**
-  # noise
-  --exclude=/var/cache/** --exclude=/var/tmp/** --exclude=/var/log/journal/**
-)
-
-rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
-  "${EXCLUDES[@]}" \
-  / "${DEST}":/
-
-echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
-echo "Login on B stays unchanged (provider creds/keys remain). Apps/data/configs are cloned."
-echo "IMPORTANT: The firewall on Server B has been disabled. Log in and c
+"${RSYNC_SSH[@]}" "${DEST}" "system
