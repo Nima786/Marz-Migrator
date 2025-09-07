@@ -102,6 +102,13 @@ else
   fi
 fi
 
+# --- NEW: Pre-emptive Target Server Safeguards ---
+echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
+# Disable common firewalls on the destination to prevent lockout after reboot.
+# The `|| true` ensures the script doesn't fail if the service doesn't exist.
+"${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw || true"
+echo "✓ Firewall services (firewalld, ufw) disabled on destination to prevent lockout."
+
 echo "=== Starting rsync full clone to ${DEST} ==="
 
 RSYNC_BASE_OPTS=(
@@ -139,3 +146,4 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
 
 echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
 echo "Login on B stays unchanged (provider creds/keys remain). Apps/data/configs are cloned."
+echo "IMPORTANT: The firewall on Server B has been disabled. Log in and configure it immediately."
