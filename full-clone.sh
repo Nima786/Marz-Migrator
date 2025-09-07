@@ -14,7 +14,7 @@ confirm_install() {
   if ! command -v "$bin" >/dev/null 2>&1; then
     read -rp "Package '$pkg' (for '$bin') is missing. Install it now? [Y/n]: " ans
     ans=${ans:-Y}
-    if [[ "$ans" =~ ^[Yy]$ ]]; a
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
       apt-get update && apt-get install -y "$pkg"
     else
       echo "Cannot continue without $pkg"
@@ -147,4 +147,4 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
 
 echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
 echo "Login on B stays unchanged (provider creds/keys remain). Apps/data/configs are cloned."
-echo "IMPORTANT: The firewall on Server B has been disabled. Log in and configure it immediately."
+echo "IMPORTANT: The firewall on Server B has been disabled. Log in and c
