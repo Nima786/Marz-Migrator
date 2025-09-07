@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# full-clone.sh — Versatile rsync clone (same-arch) with AUTH-SAFE excludes
-# - Supports both "Safe Mode" (firewall excluded) and "Expert Mode" (firewall cloned).
-# - Handles CyberPanel/LiteSpeed license migration by excluding the key.
+# server-clone-rsync — A pure, high-fidelity rsync server cloning utility.
+# - Clones the entire filesystem while preserving destination SSH, network, and user authentication.
+# - Provides an interactive "Expert Mode" to clone firewall state for specialized apps (e.g., VPNs).
+# - Assumes the user is responsible for any post-clone application-specific fixes (licenses, app repair).
 # - Supports password OR SSH key (auto-convert .ppk to OpenSSH)
 # - ShellCheck-friendly
 set -euo pipefail
 
-echo "=== Server Migration (rsync full clone: auth-safe) ==="
+echo "=== Server Migration (High-Fidelity rsync Clone) ==="
 
 # ---- helpers ----
 confirm_install() {
@@ -102,7 +103,7 @@ else
   fi
 fi
 
-# ---- Base Excludes (always active) ----
+# ---- Base Excludes (always active for safety) ----
 EXCLUDES=(
   # runtime/mounts
   --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
@@ -114,8 +115,6 @@ EXCLUDES=(
   # keep destination SSH server fully intact to prevent lockout
   --exclude=/etc/ssh/**
   --exclude=/lib/systemd/system/ssh.service
-  # Exclude LiteSpeed Enterprise license to allow re-registration
-  --exclude=/usr/local/lsws/conf/serial.no
   # keep destination AUTH intact
   --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
   --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
@@ -129,7 +128,7 @@ CLONE_FIREWALL=${CLONE_FIREWALL:-N}
 
 if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
   echo "--- Safe Mode: Firewall will NOT be cloned. ---"
-  # Apply pre-clone safeguard on destination
+  # Pre-emptively disable firewalls on destination to prevent accidental activation
   echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
   "${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw nftables || true"
   echo "✓ Firewall services disabled on destination to prevent lockout."
@@ -165,8 +164,9 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   / "${DEST}":/
 
 echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
-echo "Login on B stays unchanged (provider creds/keys remain). Apps/data/configs are cloned."
+echo "Login on B stays unchanged. File system has been cloned."
+echo "User is responsible for any post-clone application configuration (licenses, etc)."
 
 if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
-  echo "IMPORTANT: The firewall on Server B has been disabled. Log in and configure it."
+  echo "IMPORTANT: The firewall on Server B has been disabled as requested."
 fi
