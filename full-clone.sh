@@ -118,7 +118,7 @@ RSYNC_BASE_OPTS=(
   "--info=stats2,progress2"
 )
 
-# ---- Excludes (auth-safe) - REVISED ----
+# ---- Excludes (auth-safe) - FINAL ----
 EXCLUDES=(
   # runtime/mounts
   --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
@@ -130,6 +130,8 @@ EXCLUDES=(
 
   # === CRITICAL: Keep destination SSH server fully intact to prevent lockout ===
   --exclude=/etc/ssh/**
+  # --- NEW FIX: Protect the systemd service file for SSH ---
+  --exclude=/lib/systemd/system/ssh.service
 
   # 🔒 keep destination AUTH intact (so provider password/key keep working)
   --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
