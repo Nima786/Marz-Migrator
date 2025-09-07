@@ -14,7 +14,7 @@ confirm_install() {
   if ! command -v "$bin" >/dev/null 2>&1; then
     read -rp "Package '$pkg' (for '$bin') is missing. Install it now? [Y/n]: " ans
     ans=${ans:-Y}
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
+    if [[ "$ans" =~ ^[Yy]$ ]]; a
       apt-get update && apt-get install -y "$pkg"
     else
       echo "Cannot continue without $pkg"
@@ -102,10 +102,8 @@ else
   fi
 fi
 
-# --- NEW: Pre-emptive Target Server Safeguards ---
+# --- Pre-emptive Target Server Safeguards ---
 echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
-# Disable common firewalls on the destination to prevent lockout after reboot.
-# The `|| true` ensures the script doesn't fail if the service doesn't exist.
 "${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw || true"
 echo "✓ Firewall services (firewalld, ufw) disabled on destination to prevent lockout."
 
@@ -120,24 +118,27 @@ RSYNC_BASE_OPTS=(
   "--info=stats2,progress2"
 )
 
-# ---- Excludes (auth-safe) ----
+# ---- Excludes (auth-safe) - REVISED ----
 EXCLUDES=(
   # runtime/mounts
-  --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile
+  --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
   # boot (provider manages kernel/bootloader)
-  --exclude=/boot/*
+  --exclude=/boot/**
   # keep destination network & identity
-  --exclude=/etc/network/* --exclude=/etc/netplan/* --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
-  --exclude=/etc/cloud/* --exclude=/var/lib/cloud/* --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-  # keep destination SSH server config & host keys
-  --exclude=/etc/ssh/*
+  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
+  --exclude=/etc/cloud/** --exclude=/var/lib/cloud/** --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
+  
+  # === CRITICAL: Keep destination SSH server fully intact to prevent lockout ===
+  --exclude=/etc/ssh/**
+  
   # 🔒 keep destination AUTH intact (so provider password/key keep working)
-  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group
-  --exclude=/root/.ssh/* --exclude=/home/*/.ssh/*
+  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
+  --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
+  
   # optional: avoid copying firewall state (prevents lockout)
   --exclude=/etc/ufw/** --exclude=/var/lib/ufw/** --exclude=/etc/iptables* --exclude=/etc/nftables.conf --exclude=/etc/firewalld/** --exclude=/etc/fail2ban/**
   # noise
-  --exclude=/var/cache/* --exclude=/var/tmp/* --exclude=/var/log/journal/*
+  --exclude=/var/cache/** --exclude=/var/tmp/** --exclude=/var/log/journal/**
 )
 
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
