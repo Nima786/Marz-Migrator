@@ -153,7 +153,7 @@ echo "=== Starting rsync full clone to ${DEST} ==="
 RSYNC_BASE_OPTS=(
   -aAXH
   --numeric-ids
-  --delete
+ # --delete
   --force           # <-- NEW: Force deletion of non-empty dirs to resolve conflicts
   --whole-file
   --delay-updates
