@@ -127,7 +127,7 @@ echo "=== Starting rsync full clone to ${DEST} ==="
 RSYNC_BASE_OPTS=(
   -aAXH
   --numeric-ids
-  --delete
+  #--delete
   --whole-file
   --delay-updates
   "--info=stats2,progress2"
