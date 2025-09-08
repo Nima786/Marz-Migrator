@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# server-clone-rsync — High-Fidelity Application Server Cloning Utility
-# - Clones the entire application environment, including users, groups, and firewall state.
-# - Surgically excludes only the files required to preserve destination login and network identity.
-# - Designed for cloning complex applications like CyberPanel where the firewall is a critical component.
+# server-clone-rsync — The Definitive High-Fidelity Cloning Script
+# - Clones the entire filesystem while preserving destination SSH, network, and user authentication.
+# - Uses --force to resolve file/directory conflicts during deletion.
+# - Provides an interactive "Expert Mode" to clone firewall state for specialized apps (e.g., VPNs).
 # - Supports password OR SSH key (auto-convert .ppk to OpenSSH)
 # - ShellCheck-friendly
 set -euo pipefail
 
-echo "=== Server Migration (High-Fidelity Application Clone) ==="
-echo "INFO: This script clones the entire application state, including the firewall."
+echo "=== Server Migration (High-Fidelity rsync Clone) ==="
 
 # ---- helpers ----
 confirm_install() {
@@ -104,30 +103,58 @@ else
   fi
 fi
 
-# ---- Excludes (Surgical Excludes for Identity Preservation) ----
+# ---- Base Excludes (always active for safety) ----
 EXCLUDES=(
   # runtime/mounts
   --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
-  # boot
+  # boot (provider manages kernel/bootloader)
   --exclude=/boot/**
-  # keep destination network identity & fstab
-  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/fstab
+  # keep destination network & identity
+  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
   --exclude=/etc/cloud/** --exclude=/var/lib/cloud/** --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-  # keep destination SSH server fully intact
+  # keep destination SSH server fully intact to prevent lockout
   --exclude=/etc/ssh/**
   --exclude=/lib/systemd/system/ssh.service
-  # 🔒 CRITICAL: keep destination PASSWORDS and specific SSH keys
-  --exclude=/etc/shadow --exclude=/etc/gshadow
+  # keep destination AUTH intact
+  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
   --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
   # noise
   --exclude=/var/cache/** --exclude=/var/tmp/** --exclude=/var/log/journal/**
 )
 
+# ---- INTERACTIVE: Firewall Migration Choice ----
+read -rp "Clone firewall configuration (ufw, nftables, etc.)? [y/N]: " CLONE_FIREWALL
+CLONE_FIREWALL=${CLONE_FIREWALL:-N}
+
+if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
+  echo "--- Safe Mode: Firewall will NOT be cloned. ---"
+  # Pre-emptively disable firewalls on destination to prevent accidental activation
+  echo "=== Applying pre-clone safeguards on ${DEST_IP} ==="
+  "${RSYNC_SSH[@]}" "${DEST}" "systemctl disable --now firewalld ufw nftables || true"
+  echo "✓ Firewall services disabled on destination to prevent lockout."
+
+  # Add firewall paths to the excludes list
+  EXCLUDES+=(
+    --exclude=/etc/ufw/**
+    --exclude=/var/lib/ufw/**
+    --exclude=/etc/iptables*
+    --exclude=/etc/nftables.conf
+    --exclude=/etc/firewalld/**
+    --exclude=/etc/fail2ban/**
+  )
+else
+  echo "--- Expert Mode: Firewall WILL be cloned. ---"
+  echo "WARNING: Ensure firewall rules are not IP-specific to avoid lockout."
+fi
+
+
 echo "=== Starting rsync full clone to ${DEST} ==="
+
 RSYNC_BASE_OPTS=(
   -aAXH
   --numeric-ids
-  #--delete
+  --delete
+  --force           # <-- NEW: Force deletion of non-empty dirs to resolve conflicts
   --whole-file
   --delay-updates
   "--info=stats2,progress2"
@@ -138,6 +165,9 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   / "${DEST}":/
 
 echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
-echo "Login on B stays unchanged. File system and application state have been cloned."
-echo "WARNING: The source server's firewall has been cloned. Ensure its rules are not IP-specific."
-echo "If you have issues, check the firewall on the destination server first."
+echo "Login on B stays unchanged. File system has been cloned."
+echo "User is responsible for any post-clone application configuration (licenses, kernel modules, etc)."
+
+if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
+  echo "IMPORTANT: The firewall on Server B has been disabled as requested."
+fi
