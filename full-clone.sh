@@ -133,7 +133,7 @@ RSYNC_BASE_OPTS=(
   "--info=stats2,progress2"
 )
 
-rsync "${RSY_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
+rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
