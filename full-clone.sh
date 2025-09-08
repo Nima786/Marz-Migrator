@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# server-clone-rsync — The Definitive High-Fidelity Cloning Script
-# - Clones the entire filesystem while preserving destination SSH, network, and user authentication.
-# - Uses --force to resolve file/directory conflicts during deletion.
-# - Provides an interactive "Expert Mode" to clone firewall state for specialized apps (e.g., VPNs).
+# server-clone-rsync — The Ultimate High-Fidelity Cloning Script
+# - Combines robust safety features with kernel environment preservation.
+# - Clones filesystems while preserving destination SSH, network, auth, AND kernel modules.
+# - Uses --delete and --force to create a true mirror and resolve conflicts.
+# - Provides an interactive "Expert Mode" to clone firewall state.
 # - Supports password OR SSH key (auto-convert .ppk to OpenSSH)
 # - ShellCheck-friendly
 set -euo pipefail
 
-echo "=== Server Migration (High-Fidelity rsync Clone) ==="
+echo "=== Server Migration (Ultimate High-Fidelity Clone) ==="
 
 # ---- helpers ----
 confirm_install() {
@@ -107,15 +108,21 @@ fi
 EXCLUDES=(
   # runtime/mounts
   --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/tmp/** --exclude=/run/** --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile
-  # boot (provider manages kernel/bootloader)
+  # boot
   --exclude=/boot/**
-  # keep destination network & identity
+  
+  # === CRITICAL: PRESERVE DESTINATION KERNEL ENVIRONMENT ===
+  # Prevents kernel/driver mismatches that break Docker, nftables, etc.
+  --exclude=/lib/modules/**
+  --exclude=/lib/firmware/**
+
+  # network & identity
   --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
   --exclude=/etc/cloud/** --exclude=/var/lib/cloud/** --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-  # keep destination SSH server fully intact to prevent lockout
+  # SSH server
   --exclude=/etc/ssh/**
   --exclude=/lib/systemd/system/ssh.service
-  # keep destination AUTH intact
+  # User Auth
   --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group --exclude=/etc/sudoers --exclude=/etc/sudoers.d/**
   --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
   # noise
@@ -154,7 +161,7 @@ RSYNC_BASE_OPTS=(
   -aAXH
   --numeric-ids
   --delete
-  --force           # <-- NEW: Force deletion of non-empty dirs to resolve conflicts
+  --force
   --whole-file
   --delay-updates
   "--info=stats2,progress2"
@@ -166,7 +173,6 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
 
 echo "=== Clone complete. Reboot ${DEST_IP} and check services. ==="
 echo "Login on B stays unchanged. File system has been cloned."
-echo "User is responsible for any post-clone application configuration (licenses, kernel modules, etc)."
 
 if [[ "$CLONE_FIREWALL" =~ ^[Nn]$ ]]; then
   echo "IMPORTANT: The firewall on Server B has been disabled as requested."
