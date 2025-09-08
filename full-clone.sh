@@ -13,7 +13,7 @@ DEST_USER=${DEST_USER:-root}
 read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS
 echo
 
-# Common rsync + ssh options
+# Common rsync + ssh options (note: NO commas between elements)
 RSYNC_BASE_OPTS=(
   -aAXH
   --numeric-ids
