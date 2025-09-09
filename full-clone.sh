@@ -54,7 +54,7 @@ cleanup_key() {
 }
 trap cleanup_key EXIT
 
-# ---- Authentication setup and connectivity check ----
+# ---- Authentication setup ----
 SSH_CMD=()
 if [[ -n "${DEST_PASS}" ]]; then
   confirm_install sshpass sshpass
@@ -75,13 +75,19 @@ else
   SSH_CMD=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS_BASE[@]}")
 fi
 
+# ---- Remote execution function and connectivity check ----
+run_remote() {
+  # Wraps the command in 'bash -c' for robust execution
+  "${SSH_CMD[@]}" "${DEST}" "bash -c '$1'"
+}
+
 echo "=== Testing SSH connectivity ==="
-"${SSH_CMD[@]}" "${DEST}" "echo '✓ SSH connection successful'" || { echo "✗ SSH connection failed"; exit 1; }
+run_remote "echo '✓ SSH connection successful'" || { echo "✗ SSH connection failed"; exit 1; }
 
 # ---- Pre-sync preparation on Destination ----
 echo "=== Preparing destination server ==="
 # Stop services on destination to prevent file-in-use errors
-"${SSH_CMD[@]}" "${DEST}" "systemctl stop docker containerd 2>/dev/null || true; pkill -f dockerd 2>/dev/null || true"
+run_remote "systemctl stop docker containerd &>/dev/null || true"
 echo "✓ Docker services stopped on destination."
 
 # ---- Rsync Execution ----
@@ -135,7 +141,7 @@ rsync "${RSYNC_OPTS[@]}" -e "$(printf '%q ' "${SSH_CMD[@]}")" \
 echo "=== Running post-sync setup and repair on destination ==="
 
 # Using a heredoc for the remote script is cleaner and safer
-"${SSH_CMD[@]}" "${DEST}" bash <<'EOF'
+run_remote "$(cat <<'EOF'
 set -e
 echo "--- Post-sync system setup ---"
 
@@ -143,7 +149,7 @@ echo "--- Post-sync system setup ---"
 systemctl daemon-reload
 
 # Reset any services that might have failed during the process
-systemctl reset-failed docker.service docker.socket containerd.service 2>/dev/null || true
+systemctl reset-failed docker.service docker.socket containerd.service &>/dev/null || true
 
 # Start Docker's dependencies first
 if systemctl list-unit-files | grep -q "^containerd.service"; then
@@ -162,7 +168,7 @@ systemctl enable --now docker.service
 echo "Waiting for Docker daemon..."
 timeout=60
 while [ $timeout -gt 0 ]; do
-  if docker info >/dev/null 2>&1; then
+  if docker info &>/dev/null; then
     echo "✓ Docker is ready!"
     break
   fi
@@ -170,7 +176,7 @@ while [ $timeout -gt 0 ]; do
   timeout=$((timeout - 2))
 done
 
-if ! docker info >/dev/null 2>&1; then
+if ! docker info &>/dev/null; then
   echo "✗ Docker failed to start properly. Check logs:"
   journalctl -u docker.service --no-pager -n 20
   exit 1
@@ -195,8 +201,9 @@ fi
 
 echo "--- Setup completed successfully ---"
 EOF
+)"
 
 echo
 echo "=== Migration Complete! ==="
 echo "Destination server: ${DEST_IP}:${DEST_PORT}"
-echo "It is recommended to reboot the destination server now: ssh ${DEST}@${DEST_IP} -p ${DEST_PORT} 'reboot'"
+echo "It is recommended to reboot the destination server now: ssh ${DEST_USER}@${DEST_IP} -p ${DEST_PORT} 'reboot'"
