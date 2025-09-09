@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# full-clone.sh — Full rsync clone (same-arch) with conditional Docker warm-up
-# Works for Marzban, CyberPanel, and other apps that depend on Docker/systemd.
+# full-clone.sh — Full rsync clone (same-arch) skipping Docker/Containerd state
+# Goal: avoid broken dockerd after clone; let compose recreate containers cleanly.
 set -euo pipefail
 
-echo "=== Server Migration (rsync full clone) ==="
+echo "=== Server Migration (rsync full clone, docker-safe) ==="
 
 # --- helpers ---
 confirm_install() {
@@ -30,7 +30,7 @@ read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " 
 echo
 DEST="${DEST_USER}@${DEST_IP}"
 
-# --- ssh setup ---
+# --- SSH setup ---
 SSH_OPTS=(-T -x -o Compression=no -o TCPKeepAlive=yes -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com)
 
 TMP_KEY_PATH=""
@@ -86,11 +86,17 @@ fi
 # --- rsync options ---
 RSYNC_BASE_OPTS=(-aAXH --numeric-ids --delete --whole-file --delay-updates "--info=stats2,progress2")
 EXCLUDES=(
+  # runtime & mounts
   --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile
+  # boot
   --exclude=/boot/*
+  # keep dest network/identity
   --exclude=/etc/network/* --exclude=/etc/netplan/* --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
   --exclude=/etc/cloud/* --exclude=/var/lib/cloud/* --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
+  # keep dest SSH server config/host keys
   --exclude=/etc/ssh/*
+  # >>> Docker/Containerd state & config (skip copying from A) <<<
+  --exclude=/var/lib/docker/** --exclude=/etc/docker/** --exclude=/var/lib/containerd/**
 )
 
 echo "=== Starting rsync full clone to ${DEST} ==="
@@ -98,66 +104,33 @@ rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
-# --- post-clone: conditional Docker + compose bring-up (logged) ---
+# --- post-clone: start docker if present; bring up compose stacks (no installs) ---
 read -r -d '' POST <<'EOF'
 set -e
-LOG=/var/log/server-clone-post.log
-{
-  echo "== $(date -Is) : Post-clone start =="
+systemctl daemon-reload || true
 
-  systemctl daemon-reload || true
-
-  # helper to check docker active
-  is_docker_active() { systemctl is-active --quiet docker; }
-
-  echo "[1] Try to start docker as-is"
-  mkdir -p /var/lib/docker
-  systemctl enable --now docker 2>/dev/null || systemctl start docker || true
-  if is_docker_active; then echo "Docker is running (as-is)"; exit 0; fi
-
-  echo "[2] First-aid: stop docker, clear stale PID/socket, ensure containerd"
-  systemctl stop docker 2>/dev/null || true
-  rm -f /var/run/docker.pid /var/run/docker.sock 2>/dev/null || true
+# Start containerd/docker only if binaries exist
+if command -v containerd >/dev/null 2>&1; then
   systemctl enable --now containerd 2>/dev/null || systemctl restart containerd || true
-  modprobe overlay 2>/dev/null || true
-  systemctl start docker || true
-  if is_docker_active; then echo "Docker started after first-aid"; exit 0; fi
+fi
+if command -v dockerd >/dev/null 2>&1 || systemctl list-unit-files --type=service | grep -q '^docker\.service'; then
+  # clean any stale sock/pid just in case (harmless if absent)
+  rm -f /var/run/docker.pid /var/run/docker.sock 2>/dev/null || true
+  mkdir -p /var/lib/docker
+  systemctl enable --now docker 2>/dev/null || systemctl restart docker || true
+fi
 
-  echo "[3] Second-aid: clear stale docker network db"
-  rm -f /var/lib/docker/network/files/local-kv.db 2>/dev/null || true
-  systemctl restart docker || true
-  if is_docker_active; then echo "Docker started after clearing network DB"; exit 0; fi
-
-  echo "[4] Last resort: temporarily back up daemon.json if present"
-  if [ -f /etc/docker/daemon.json ]; then
-    mv -v /etc/docker/daemon.json "/etc/docker/daemon.json.bak.$(date +%s)" || true
-    systemctl restart docker || true
-  fi
-  if is_docker_active; then echo "Docker started after daemon.json backup"; fi
-
-  # Continue either way; compose bring-up will succeed only if docker is running
-  if is_docker_active; then
-    echo "[Compose] Checking for docker-compose stacks"
-    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-      for y in \
-        /opt/*/docker-compose.yml \
-        /srv/*/docker-compose.yml \
-        /root/*/docker-compose.yml \
-        /var/*/docker-compose.yml ; do
-        if [ -f "$y" ]; then
-          echo "Bringing up stack at $y"
-          ( cd "$(dirname "$y")" && docker compose up -d ) || true
-        fi
-      done
-    else
-      echo "docker compose plugin not present; skipping compose bring-up"
-    fi
-  else
-    echo "Docker not running after all attempts; skipping compose bring-up"
-  fi
-
-  echo "== $(date -Is) : Post-clone end =="
-} >>"$LOG" 2>&1
+# If docker is running and compose plugin exists, bring up stacks
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  for y in \
+    /opt/*/docker-compose.yml \
+    /srv/*/docker-compose.yml \
+    /root/*/docker-compose.yml \
+    /var/*/docker-compose.yml ; do
+    [ -f "$y" ] || continue
+    ( cd "$(dirname "$y")" && docker compose up -d ) || true
+  done
+fi
 EOF
 
 if [[ "${AUTH_MODE}" == "password" ]]; then
@@ -166,5 +139,4 @@ else
   "${RSYNC_SSH[@]}" "${DEST}" "${POST}"
 fi
 
-echo "=== Clone complete. Check /var/log/server-clone-post.log on ${DEST_IP} for details. ==="
-echo "Reboot is optional; if Marzban/CyberPanel use Docker, they should start once Docker is active."
+echo "=== Clone complete. Docker state/config was NOT copied; compose stacks were brought up cleanly on ${DEST_IP}. ==="
