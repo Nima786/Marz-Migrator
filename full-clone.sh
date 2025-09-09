@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# full-clone.sh — Full rsync clone (same-arch) skipping Docker/Containerd state
-# Goal: avoid broken dockerd after clone; let compose recreate containers cleanly.
-set -euo pipefail
+# full-clone.sh — Full rsync clone (same-arch) that leaves Server B login untouched
+# - Copies apps/configs/data
+# - Keeps B's SSH/server login intact (does NOT copy /etc/{shadow,passwd} or users' ~/.ssh)
+# - No Docker/systemd post-processing; pure clone
 
-echo "=== Server Migration (rsync full clone, docker-safe) ==="
+set -euo pipefail
+echo "=== Server Migration (rsync full clone: auth-safe, no post steps) ==="
 
 # --- helpers ---
 confirm_install() {
   local pkg="$1" bin="$2"
   if ! command -v "$bin" >/dev/null 2>&1; then
-    read -rp "Package '$pkg' (for '$bin') is missing. Install it now? [Y/n]: " ans
-    ans=${ans:-Y}
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
+    read -rp "Package '$pkg' (for '$bin') is missing. Install it now? [Y/n]: " a
+    a=${a:-Y}
+    if [[ "$a" =~ ^[Yy]$ ]]; then
       apt-get update && apt-get install -y "$pkg"
     else
       echo "Cannot continue without $pkg"; exit 1
@@ -19,6 +21,7 @@ confirm_install() {
   fi
 }
 
+# prereqs on Source (A)
 confirm_install rsync rsync
 confirm_install openssh-client ssh
 
@@ -42,18 +45,16 @@ cleanup_key() {
 trap cleanup_key EXIT
 
 RSYNC_SSH=()
-AUTH_MODE="password"
 if [[ -n "${DEST_PASS}" ]]; then
   confirm_install sshpass sshpass
   RSYNC_SSH=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS[@]}")
 else
-  AUTH_MODE="key"
   read -rp "SSH private key path (default: ~/.ssh/id_ed25519): " KEY_PATH
   KEY_PATH=${KEY_PATH:-~/.ssh/id_ed25519}
   if [[ "${KEY_PATH}" == *.ppk ]]; then
     confirm_install putty-tools puttygen
     TMP_KEY_PATH="/root/rsync_key_$$"
-    echo "Converting PPK -> OpenSSH key…"
+    echo "Converting PPK -> OpenSSH…"
     puttygen "${KEY_PATH}" -O private-openssh -o "${TMP_KEY_PATH}"
     chmod 600 "${TMP_KEY_PATH}"
     KEY_PATH="${TMP_KEY_PATH}"
@@ -63,80 +64,53 @@ else
   RSYNC_SSH=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS[@]}")
 fi
 
-# refresh known_hosts
+# avoid stale known_hosts on reused IPs
 ssh-keygen -R "${DEST_IP}" >/dev/null 2>&1 || true
 ssh-keyscan -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
 # connectivity check
 echo "=== Checking SSH connectivity ==="
-if [[ "${AUTH_MODE}" == "password" ]]; then
-  if sshpass -p "${DEST_PASS}" ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "${DEST}" "echo ok" 2>/dev/null | grep -q ok; then
-    echo "✓ SSH reachable with password."
-  else
-    echo "✗ Could not log in with the provided password."; exit 1
-  fi
+if "${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true >/dev/null 2>&1; then
+  echo "✓ SSH reachable."
 else
-  if "${RSYNC_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "${DEST}" true >/dev/null 2>&1; then
-    echo "✓ SSH reachable with key."
-  else
-    echo "✗ SSH key login failed (non-interactive)."; exit 1
-  fi
+  echo "✗ SSH connectivity failed."; exit 1
 fi
 
-# --- rsync options ---
-RSYNC_BASE_OPTS=(-aAXH --numeric-ids --delete --whole-file --delay-updates "--info=stats2,progress2")
+echo "=== Starting rsync full clone to ${DEST} ==="
+
+# rsync core options
+RSYNC_BASE_OPTS=(
+  -aAXH
+  --numeric-ids
+  --delete
+  --whole-file
+  --delay-updates
+  "--info=stats2,progress2"
+)
+
+# Excludes: runtime, boot, network identity, SSH server, AUTH files, users' keys, (optional) firewall
 EXCLUDES=(
-  # runtime & mounts
+  # runtime/mounts
   --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile
   # boot
   --exclude=/boot/*
-  # keep dest network/identity
+  # keep destination network/identity
   --exclude=/etc/network/* --exclude=/etc/netplan/* --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
   --exclude=/etc/cloud/* --exclude=/var/lib/cloud/* --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-  # keep dest SSH server config/host keys
+  # keep destination SSH server config & host keys
   --exclude=/etc/ssh/*
-  # >>> Docker/Containerd state & config (skip copying from A) <<<
-  --exclude=/var/lib/docker/** --exclude=/etc/docker/** --exclude=/var/lib/containerd/**
+  # ⛔ do NOT copy auth creds from A → B (B's login stays untouched)
+  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group
+  --exclude=/root/.ssh/* --exclude=/home/*/.ssh/*
+  # optional: avoid copying firewall state to prevent accidental lockout
+  --exclude=/etc/ufw/** --exclude=/var/lib/ufw/** --exclude=/etc/iptables* --exclude=/etc/nftables.conf --exclude=/etc/firewalld/** --exclude=/etc/fail2ban/**
+  # noise
+  --exclude=/var/cache/* --exclude=/var/tmp/* --exclude=/var/log/journal/*
 )
 
-echo "=== Starting rsync full clone to ${DEST} ==="
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
-# --- post-clone: start docker if present; bring up compose stacks (no installs) ---
-read -r -d '' POST <<'EOF'
-set -e
-systemctl daemon-reload || true
-
-# Start containerd/docker only if binaries exist
-if command -v containerd >/dev/null 2>&1; then
-  systemctl enable --now containerd 2>/dev/null || systemctl restart containerd || true
-fi
-if command -v dockerd >/dev/null 2>&1 || systemctl list-unit-files --type=service | grep -q '^docker\.service'; then
-  # clean any stale sock/pid just in case (harmless if absent)
-  rm -f /var/run/docker.pid /var/run/docker.sock 2>/dev/null || true
-  mkdir -p /var/lib/docker
-  systemctl enable --now docker 2>/dev/null || systemctl restart docker || true
-fi
-
-# If docker is running and compose plugin exists, bring up stacks
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  for y in \
-    /opt/*/docker-compose.yml \
-    /srv/*/docker-compose.yml \
-    /root/*/docker-compose.yml \
-    /var/*/docker-compose.yml ; do
-    [ -f "$y" ] || continue
-    ( cd "$(dirname "$y")" && docker compose up -d ) || true
-  done
-fi
-EOF
-
-if [[ "${AUTH_MODE}" == "password" ]]; then
-  sshpass -p "${DEST_PASS}" ssh -o StrictHostKeyChecking=accept-new "${DEST}" "${POST}"
-else
-  "${RSYNC_SSH[@]}" "${DEST}" "${POST}"
-fi
-
-echo "=== Clone complete. Docker state/config was NOT copied; compose stacks were brought up cleanly on ${DEST_IP}. ==="
+echo
+echo "=== Clone complete. Server B login remains exactly as before. Reboot ${DEST_IP} and test your services. ==="
