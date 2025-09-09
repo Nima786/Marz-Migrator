@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-# Full rsync clone (same-arch) — auth-safe + robust password probe
-# - Keeps B's login intact (does NOT copy /etc/{shadow,passwd} or users' ~/.ssh)
-# - Minimal excludes; no post processing
-
+# Full rsync clone (same-arch) — auth-safe, port-aware, robust password probe
+# IMPORTANT: No --numeric-ids, so owners map by NAME to Server B's users
 set -euo pipefail
-echo "=== Server Migration (rsync full clone: auth-safe) ==="
+echo "=== Server Migration (rsync full clone: auth-safe, name-mapped owners) ==="
 
-# --- helpers ---
 confirm_install() {
   local pkg="$1" bin="$2"
   if ! command -v "$bin" >/dev/null 2>&1; then
@@ -20,21 +17,18 @@ confirm_install() {
   fi
 }
 
-# prereqs on Source (A)
+# prerequisites on Source (A)
 confirm_install rsync rsync
 confirm_install openssh-client ssh
 
-# --- inputs ---
-read -rp "Destination server IP/host: " DEST_IP
-read -rp "Destination SSH port (default: 22): " DEST_PORT
-DEST_PORT=${DEST_PORT:-22}
-read -rp "Destination username (default: root): " DEST_USER
-DEST_USER=${DEST_USER:-root}
-read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS
-echo
+# inputs
+read -rp "Destination host/IP: " DEST_IP
+read -rp "Destination SSH port (default: 22): " DEST_PORT; DEST_PORT=${DEST_PORT:-22}
+read -rp "Destination username (default: root): " DEST_USER; DEST_USER=${DEST_USER:-root}
+read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS; echo
 DEST="${DEST_USER}@${DEST_IP}"
 
-# --- SSH options ---
+# SSH options
 SSH_OPTS_BASE=(
   -T -x
   -p "${DEST_PORT}"
@@ -45,7 +39,7 @@ SSH_OPTS_BASE=(
   -c aes128-gcm@openssh.com
 )
 
-# clean known_hosts for this host:port and refresh
+# refresh known_hosts for host:port
 ssh-keygen -R "[${DEST_IP}]:${DEST_PORT}" >/dev/null 2>&1 || true
 ssh-keyscan -p "${DEST_PORT}" -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -57,20 +51,17 @@ cleanup_key() {
 }
 trap cleanup_key EXIT
 
-# --- choose auth method + robust connectivity probe ---
+# auth + robust probe
 RSYNC_SSH=()
-
 if [[ -n "${DEST_PASS}" ]]; then
   confirm_install sshpass sshpass
-
-  # Try strict "password" first, then fall back to keyboard-interactive
   echo "=== Checking SSH connectivity (password) ==="
   if sshpass -p "${DEST_PASS}" ssh \
       "${SSH_OPTS_BASE[@]}" \
       -o PreferredAuthentications=password \
       -o PubkeyAuthentication=no \
       -o KbdInteractiveAuthentication=no \
-      "${DEST}" "true" >/dev/null 2>&1; then
+      "${DEST}" true >/dev/null 2>&1; then
     echo "✓ SSH reachable with password."
   else
     echo "… password-only failed, trying keyboard-interactive"
@@ -78,11 +69,10 @@ if [[ -n "${DEST_PASS}" ]]; then
         "${SSH_OPTS_BASE[@]}" \
         -o PreferredAuthentications=keyboard-interactive,password \
         -o PubkeyAuthentication=no \
-        "${DEST}" "true" >/dev/null 2>&1; then
+        "${DEST}" true >/dev/null 2>&1; then
       echo "✓ SSH reachable with keyboard-interactive."
     else
-      echo "✗ SSH connectivity failed with the provided password."
-      exit 1
+      echo "✗ SSH connectivity failed with the provided password."; exit 1
     fi
   fi
   RSYNC_SSH=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS_BASE[@]}")
@@ -100,30 +90,26 @@ else
   fi
   [[ -f "${KEY_PATH}" ]] || { echo "SSH key not found: ${KEY_PATH}"; exit 1; }
   chmod 600 "${KEY_PATH}" || true
-
-  # key probe (non-interactive)
   if ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes -o BatchMode=yes "${SSH_OPTS_BASE[@]}" "${DEST}" true >/dev/null 2>&1; then
     echo "✓ SSH reachable with key."
   else
-    echo "✗ SSH key login failed (non-interactive)."
-    exit 1
+    echo "✗ SSH key login failed (non-interactive)."; exit 1
   fi
   RSYNC_SSH=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS_BASE[@]}")
 fi
 
-echo "=== Starting rsync full clone to ${DEST} ==="
+echo "=== Starting rsync to ${DEST} (port ${DEST_PORT}) ==="
 
-# rsync core options
+# rsync opts — NOTE: no --numeric-ids (let names map to B's users)
 RSYNC_BASE_OPTS=(
   -aAXH
-  --numeric-ids
   --delete
   --whole-file
   --delay-updates
   "--info=stats2,progress2"
 )
 
-# Excludes: runtime, boot, network identity, SSH server, AUTH files, users' keys, optional firewall
+# Excludes: runtime, boot, network identity, SSH server, AUTH files, users' keys, optional firewall/caches
 EXCLUDES=(
   --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile
   --exclude=/boot/*
@@ -136,10 +122,9 @@ EXCLUDES=(
   --exclude=/var/cache/* --exclude=/var/tmp/* --exclude=/var/log/journal/*
 )
 
-# Run rsync
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
 echo
-echo "=== Clone complete. Server B login remains exactly as before. Reboot ${DEST_IP} and test your services. ==="
+echo "=== Clone complete. Server B login stays unchanged. Reboot ${DEST_IP} and test your services. ==="
