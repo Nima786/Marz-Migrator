@@ -206,55 +206,55 @@ systemctl enable docker.service
 systemctl start docker.service
 
 # Wait for Docker to be ready
-echo "Waiting for Docker to be ready..."
+echo \"Waiting for Docker to be ready...\"
 timeout=60
-while [ $timeout -gt 0 ]; do
+while [ \$timeout -gt 0 ]; do
   if docker info >/dev/null 2>&1; then
-    echo "✓ Docker is ready!"
+    echo \"✓ Docker is ready!\"
     break
   fi
   sleep 2
-  timeout=$((timeout-2))
+  timeout=\$((timeout-2))
 done
 
 if ! docker info >/dev/null 2>&1; then
-  echo "✗ Docker failed to start properly"
+  echo \"✗ Docker failed to start properly\"
   journalctl -u docker.service --no-pager -n 10
   exit 1
 fi
 
 # Start Marzban if directory exists
-if [ -d "/opt/marzban" ]; then
-  echo "=== Starting Marzban services ==="
+if [ -d \"/opt/marzban\" ]; then
+  echo \"=== Starting Marzban services ===\"
   cd /opt/marzban
   
   # Check if docker-compose.yml exists
-  if [ -f "docker-compose.yml" ] || [ -f "compose.yml" ]; then
-    echo "Pulling latest images..."
-    docker compose pull || echo "Warning: Could not pull some images"
+  if [ -f \"docker-compose.yml\" ] || [ -f \"compose.yml\" ]; then
+    echo \"Pulling latest images...\"
+    docker compose pull || echo \"Warning: Could not pull some images\"
     
-    echo "Starting Marzban containers..."
+    echo \"Starting Marzban containers...\"
     docker compose up -d
     
-    echo "Waiting for services to start..."
+    echo \"Waiting for services to start...\"
     sleep 10
     
-    echo "=== Marzban Status ==="
+    echo \"=== Marzban Status ===\"
     docker compose ps
     
     # Check if main containers are running
-    if docker compose ps --services --filter "status=running" | grep -q .; then
-      echo "✓ Marzban services are running!"
+    if docker compose ps --services --filter \"status=running\" | grep -q .; then
+      echo \"✓ Marzban services are running!\"
     else
-      echo "⚠ Some Marzban services may not be running properly"
+      echo \"⚠ Some Marzban services may not be running properly\"
       docker compose logs --tail=20
     fi
   else
-    echo "⚠ No docker-compose.yml found in /opt/marzban"
+    echo \"⚠ No docker-compose.yml found in /opt/marzban\"
     ls -la /opt/marzban/
   fi
 else
-  echo "⚠ /opt/marzban directory not found"
+  echo \"⚠ /opt/marzban directory not found\"
 fi
 
 echo "=== Setup completed ==="
