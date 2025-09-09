@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Fixed rsync clone script - preserves Docker data and services
-# This version handles Docker containers and services properly
+# Marzban Server Clone Script - Complete Docker-aware migration
+# Handles Docker services, systemd states, and Marzban data properly
 
 set -euo pipefail
-echo "=== Server Migration (rsync full clone: docker-aware) ==="
+echo "=== Marzban Server Clone Script ==="
 
 confirm_install() {
   local pkg="$1" bin="$2"
@@ -18,21 +18,20 @@ confirm_install() {
   fi
 }
 
-# prerequisites on Source (A)
+# Prerequisites
 confirm_install rsync rsync
 confirm_install openssh-client ssh
 
-# inputs
+# Get destination details
 read -rp "Destination host/IP: " DEST_IP
 read -rp "Destination SSH port (default: 22): " DEST_PORT; DEST_PORT=${DEST_PORT:-22}
 read -rp "Destination username (default: root): " DEST_USER; DEST_USER=${DEST_USER:-root}
 read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS; echo
 DEST="${DEST_USER}@${DEST_IP}"
 
-# SSH options
+# SSH configuration
 SSH_OPTS_BASE=(
-  -T -x
-  -p "${DEST_PORT}"
+  -T -x -p "${DEST_PORT}"
   -o Compression=no
   -o TCPKeepAlive=yes
   -o ServerAliveInterval=30
@@ -40,7 +39,7 @@ SSH_OPTS_BASE=(
   -c aes128-gcm@openssh.com
 )
 
-# refresh known_hosts for host:port
+# Setup SSH keys if needed
 ssh-keygen -R "[${DEST_IP}]:${DEST_PORT}" >/dev/null 2>&1 || true
 ssh-keyscan -p "${DEST_PORT}" -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -52,163 +51,232 @@ cleanup_key() {
 }
 trap cleanup_key EXIT
 
-# auth + robust probe
+# Setup authentication
 RSYNC_SSH=()
 if [[ -n "${DEST_PASS}" ]]; then
   confirm_install sshpass sshpass
-  echo "=== Checking SSH connectivity (password) ==="
-  if sshpass -p "${DEST_PASS}" ssh \
-      "${SSH_OPTS_BASE[@]}" \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      -o KbdInteractiveAuthentication=no \
-      "${DEST}" true >/dev/null 2>&1; then
-    echo "✓ SSH reachable with password."
-  else
-    echo "… password-only failed, trying keyboard-interactive"
-    if sshpass -p "${DEST_PASS}" ssh \
-        "${SSH_OPTS_BASE[@]}" \
-        -o PreferredAuthentications=keyboard-interactive,password \
-        -o PubkeyAuthentication=no \
-        "${DEST}" true >/dev/null 2>&1; then
-      echo "✓ SSH reachable with keyboard-interactive."
-    else
-      echo "✗ SSH connectivity failed with the provided password."; exit 1
-    fi
-  fi
+  echo "=== Testing SSH with password ==="
+  sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS_BASE[@]}" "${DEST}" true || {
+    echo "✗ SSH password authentication failed"; exit 1
+  }
+  echo "✓ SSH password authentication working"
   RSYNC_SSH=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS_BASE[@]}")
 else
-  echo "=== Using SSH key authentication ==="
+  echo "=== Setting up SSH key authentication ==="
   read -rp "SSH private key path (default: ~/.ssh/id_ed25519): " KEY_PATH
   KEY_PATH=${KEY_PATH:-~/.ssh/id_ed25519}
   if [[ "${KEY_PATH}" == *.ppk ]]; then
     confirm_install putty-tools puttygen
     TMP_KEY_PATH="/root/rsync_key_$$"
-    echo "Converting PPK -> OpenSSH…"
+    echo "Converting PPK to OpenSSH format..."
     puttygen "${KEY_PATH}" -O private-openssh -o "${TMP_KEY_PATH}"
     chmod 600 "${TMP_KEY_PATH}"
     KEY_PATH="${TMP_KEY_PATH}"
   fi
   [[ -f "${KEY_PATH}" ]] || { echo "SSH key not found: ${KEY_PATH}"; exit 1; }
-  chmod 600 "${KEY_PATH}" || true
-  if ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes -o BatchMode=yes "${SSH_OPTS_BASE[@]}" "${DEST}" true >/dev/null 2>&1; then
-    echo "✓ SSH reachable with key."
-  else
-    echo "✗ SSH key login failed (non-interactive)."; exit 1
-  fi
+  chmod 600 "${KEY_PATH}" 2>/dev/null || true
+  ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes -o BatchMode=yes "${SSH_OPTS_BASE[@]}" "${DEST}" true || {
+    echo "✗ SSH key authentication failed"; exit 1
+  }
+  echo "✓ SSH key authentication working"
   RSYNC_SSH=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS_BASE[@]}")
 fi
 
-# STOP SERVICES ON SOURCE BEFORE SYNC
-echo "=== Stopping services on source server ==="
-systemctl stop docker 2>/dev/null || echo "Docker not running"
-systemctl stop marzban 2>/dev/null || echo "Marzban service not found"
+# Function to run commands on destination
+run_remote() {
+  local cmd="$1"
+  if [[ -n "${DEST_PASS}" ]]; then
+    sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS_BASE[@]}" "${DEST}" "${cmd}"
+  else
+    ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS_BASE[@]}" "${DEST}" "${cmd}"
+  fi
+}
 
-echo "=== Starting rsync to ${DEST} (port ${DEST_PORT}) ==="
+echo "=== Pre-sync preparation ==="
 
-# rsync options
-RSYNC_BASE_OPTS=(
-  -aAXH
+# Stop services on source
+echo "Stopping Docker services on source..."
+systemctl stop docker 2>/dev/null || echo "Docker not running on source"
+
+# Stop services on destination
+echo "Stopping services on destination..."
+run_remote "systemctl stop docker 2>/dev/null || true; pkill -f dockerd 2>/dev/null || true; pkill -f containerd 2>/dev/null || true"
+
+# Clean destination Docker state
+echo "Cleaning Docker runtime state on destination..."
+run_remote "rm -rf /var/run/docker.sock /var/run/docker.pid /var/run/docker/* /run/docker.sock /run/docker.pid 2>/dev/null || true"
+
+echo "=== Starting rsync migration ==="
+
+# Rsync options - more conservative approach
+RSYNC_OPTS=(
+  -avAXH
+  --numeric-ids
   --delete
+  --delete-excluded
   --whole-file
-  --delay-updates
-  "--info=stats2,progress2"
+  --inplace
+  --progress
 )
 
-# FIXED EXCLUDES - Keep Docker data but exclude only problematic runtime files
+# Smart excludes - keep Docker data but exclude problematic runtime files
 EXCLUDES=(
-  # runtime/mounts
-  --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/tmp/* --exclude=/run/* --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile
-  # boot
-  --exclude=/boot/*
-  # keep destination network/identity
-  --exclude=/etc/network/* --exclude=/etc/netplan/* --exclude=/etc/hostname --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
-  --exclude=/etc/cloud/* --exclude=/var/lib/cloud/* --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-  # keep destination SSH server config & host keys
-  --exclude=/etc/ssh/*
-  # DO NOT copy auth creds or users' keys from A -> B
-  --exclude=/etc/shadow --exclude=/etc/gshadow --exclude=/etc/passwd --exclude=/etc/group
-  --exclude=/root/.ssh/* --exclude=/home/*/.ssh/*
-  # reduce noise
-  --exclude=/var/cache/* --exclude=/var/tmp/* --exclude=/var/log/journal/*
-
-  # MINIMAL Docker excludes - only exclude truly problematic files
-  --exclude=/var/lib/docker/tmp/**
-  --exclude=/var/lib/docker/containers/*/mounts/**
-  --exclude=/run/docker.sock
-  --exclude=/var/run/docker.sock
-  # Keep most docker data but exclude unit file overrides that might conflict
-  --exclude=/etc/systemd/system/docker.service.d/**
+  # System runtime
+  --exclude=/dev/* --exclude=/proc/* --exclude=/sys/* --exclude=/run/* --exclude=/tmp/*
+  --exclude=/mnt/* --exclude=/media/* --exclude=/lost+found --exclude=/swapfile*
+  
+  # Boot files
+  --exclude=/boot/efi/* --exclude=/boot/grub/*
+  
+  # Network and system identity (keep destination's settings)
+  --exclude=/etc/network/* --exclude=/etc/netplan/* --exclude=/etc/hostname
+  --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
+  --exclude=/etc/cloud/* --exclude=/var/lib/cloud/* 
+  --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
+  
+  # SSH (keep destination's SSH config)
+  --exclude=/etc/ssh/ssh_host_* --exclude=/etc/ssh/sshd_config
+  
+  # User auth (keep destination's users)
+  --exclude=/etc/shadow* --exclude=/etc/passwd* --exclude=/etc/group* --exclude=/etc/gshadow*
+  --exclude=/root/.ssh/authorized_keys --exclude=/home/*/.ssh/authorized_keys
+  
+  # Logs and cache
+  --exclude=/var/log/* --exclude=/var/cache/* --exclude=/var/tmp/*
+  --exclude=/var/log/journal/* --exclude=/var/lib/systemd/coredump/*
+  
+  # Docker runtime exclusions (only exclude truly problematic files)
+  --exclude=/var/run/docker.sock --exclude=/run/docker.sock
+  --exclude=/var/run/docker.pid --exclude=/run/docker.pid
+  --exclude=/var/lib/docker/tmp/* --exclude=/var/lib/docker/containers/*/mounts/shm/*
+  --exclude=/var/lib/docker/overlay2/*/merged/* --exclude=/var/lib/docker/overlay2/*/work/*
+  --exclude=/var/lib/containerd/io.containerd.runtime.v*/tasks/*
+  --exclude=/var/lib/containerd/tmpmounts/*
 )
 
-# Run rsync
-rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
+# Execute rsync
+echo "Syncing filesystem (this may take a while)..."
+rsync "${RSYNC_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
-echo
-echo "=== Running post-clone setup on destination server ==="
+echo "=== Post-sync configuration ==="
 
-# Post-clone commands to run on destination
-POST_CLONE_COMMANDS='
+# Comprehensive post-sync setup
+POST_SYNC_SETUP='
+set -e
+echo "=== Post-sync system setup ==="
+
+# Fix permissions and ownership
+echo "Fixing critical permissions..."
+chown root:root /var/lib/docker 2>/dev/null || true
+chown root:docker /var/run/docker.sock 2>/dev/null || true
+chmod 755 /var/lib/docker 2>/dev/null || true
+
+# Ensure Docker group exists
+groupadd -f docker
+
+# Clean any remaining Docker runtime state
+rm -rf /var/run/docker.sock /var/run/docker.pid /run/docker.sock /run/docker.pid 2>/dev/null || true
+rm -rf /var/lib/docker/tmp/* 2>/dev/null || true
+
 # Reload systemd
 systemctl daemon-reload
 
-# Fix Docker permissions and start
-if command -v docker >/dev/null 2>&1; then
-  echo "Setting up Docker..."
-  systemctl enable docker
-  systemctl start docker || {
-    echo "Docker failed to start, trying reset..."
-    systemctl reset-failed docker
-    systemctl start docker
-  }
-  
-  # Wait for docker to be ready
-  timeout 30 bash -c "until docker info >/dev/null 2>&1; do sleep 1; done" || echo "Docker may not be fully ready"
+# Reset any failed services
+systemctl reset-failed docker.service 2>/dev/null || true
+systemctl reset-failed docker.socket 2>/dev/null || true
+systemctl reset-failed containerd.service 2>/dev/null || true
+
+# Start containerd first (if exists)
+if systemctl list-unit-files | grep -q "^containerd.service"; then
+  echo "Starting containerd..."
+  systemctl enable containerd.service
+  systemctl start containerd.service
+  sleep 3
 fi
 
-# Navigate to Marzban and start services
+# Start Docker socket and service
+echo "Starting Docker services..."
+systemctl enable docker.socket
+systemctl start docker.socket
+sleep 2
+
+systemctl enable docker.service
+systemctl start docker.service
+
+# Wait for Docker to be ready
+echo "Waiting for Docker to be ready..."
+timeout=60
+while [ $timeout -gt 0 ]; do
+  if docker info >/dev/null 2>&1; then
+    echo "✓ Docker is ready!"
+    break
+  fi
+  sleep 2
+  timeout=$((timeout-2))
+done
+
+if ! docker info >/dev/null 2>&1; then
+  echo "✗ Docker failed to start properly"
+  journalctl -u docker.service --no-pager -n 10
+  exit 1
+fi
+
+# Start Marzban if directory exists
 if [ -d "/opt/marzban" ]; then
-  echo "Starting Marzban services..."
+  echo "=== Starting Marzban services ==="
   cd /opt/marzban
   
-  # Pull any missing images
-  docker compose pull || echo "Could not pull images"
-  
-  # Start services
-  docker compose up -d || echo "Failed to start Marzban services"
-  
-  # Check status
-  sleep 5
-  docker compose ps
+  # Check if docker-compose.yml exists
+  if [ -f "docker-compose.yml" ] || [ -f "compose.yml" ]; then
+    echo "Pulling latest images..."
+    docker compose pull || echo "Warning: Could not pull some images"
+    
+    echo "Starting Marzban containers..."
+    docker compose up -d
+    
+    echo "Waiting for services to start..."
+    sleep 10
+    
+    echo "=== Marzban Status ==="
+    docker compose ps
+    
+    # Check if main containers are running
+    if docker compose ps --services --filter "status=running" | grep -q .; then
+      echo "✓ Marzban services are running!"
+    else
+      echo "⚠ Some Marzban services may not be running properly"
+      docker compose logs --tail=20
+    fi
+  else
+    echo "⚠ No docker-compose.yml found in /opt/marzban"
+    ls -la /opt/marzban/
+  fi
 else
-  echo "Marzban directory not found at /opt/marzban"
+  echo "⚠ /opt/marzban directory not found"
 fi
 
-# Start other services that might be needed
-systemctl start cron 2>/dev/null || true
-systemctl start rsyslog 2>/dev/null || true
-
-echo "Post-clone setup completed!"
+echo "=== Setup completed ==="
 '
 
-# Execute post-clone commands on destination
-echo "Executing post-clone setup commands..."
-if [[ -n "${DEST_PASS}" ]]; then
-  sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS_BASE[@]}" "${DEST}" "${POST_CLONE_COMMANDS}"
-else
-  ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS_BASE[@]}" "${DEST}" "${POST_CLONE_COMMANDS}"
-fi
+# Execute post-sync setup
+echo "Running post-sync setup on destination..."
+run_remote "${POST_SYNC_SETUP}"
 
-# RESTART SERVICES ON SOURCE
-echo "=== Restarting services on source server ==="
-systemctl start docker 2>/dev/null || echo "Could not restart docker on source"
-systemctl start marzban 2>/dev/null || echo "Marzban service not found on source"
+# Restart Docker on source
+echo "Restarting Docker on source server..."
+systemctl start docker 2>/dev/null || echo "Could not restart Docker on source"
 
 echo
-echo "=== Clone complete! ==="
-echo "Check the destination server with:"
+echo "=== Migration Complete! ==="
+echo "Destination server: ${DEST_IP}:${DEST_PORT}"
+echo
+echo "To verify the migration:"
 echo "  ssh ${DEST_USER}@${DEST_IP} -p ${DEST_PORT}"
 echo "  docker ps"
 echo "  cd /opt/marzban && docker compose ps"
+echo "  docker compose logs"
+echo
+echo "If you encounter issues, check logs with:"
+echo "  journalctl -u docker.service -f"
