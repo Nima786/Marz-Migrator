@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Full rsync clone (same-arch) — auth-safe, port-aware, robust password probe
-# IMPORTANT: No --numeric-ids, so owners map by NAME to Server B's users
+# Full rsync clone (same-arch)
+# - Leaves Server B login untouched (excludes auth files and users' ~/.ssh)
+# - Port-aware + robust password probe (password + keyboard-interactive)
+# - Minimal Docker first-aid (no installs): try to start, clear stale pid/sock, ensure containerd
+# - Logs post actions to /var/log/server-clone-post.log on Server B
+
 set -euo pipefail
-echo "=== Server Migration (rsync full clone: auth-safe, name-mapped owners) ==="
+echo "=== Server Migration (rsync full clone: auth-safe) ==="
 
 confirm_install() {
   local pkg="$1" bin="$2"
@@ -17,11 +21,11 @@ confirm_install() {
   fi
 }
 
-# prerequisites on Source (A)
+# Prereqs on Source (A)
 confirm_install rsync rsync
 confirm_install openssh-client ssh
 
-# inputs
+# Inputs
 read -rp "Destination host/IP: " DEST_IP
 read -rp "Destination SSH port (default: 22): " DEST_PORT; DEST_PORT=${DEST_PORT:-22}
 read -rp "Destination username (default: root): " DEST_USER; DEST_USER=${DEST_USER:-root}
@@ -39,7 +43,7 @@ SSH_OPTS_BASE=(
   -c aes128-gcm@openssh.com
 )
 
-# refresh known_hosts for host:port
+# Refresh known_hosts for host:port
 ssh-keygen -R "[${DEST_IP}]:${DEST_PORT}" >/dev/null 2>&1 || true
 ssh-keyscan -p "${DEST_PORT}" -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -51,11 +55,12 @@ cleanup_key() {
 }
 trap cleanup_key EXIT
 
-# auth + robust probe
+# Auth + robust probe
 RSYNC_SSH=()
 if [[ -n "${DEST_PASS}" ]]; then
   confirm_install sshpass sshpass
   echo "=== Checking SSH connectivity (password) ==="
+  # Try password only first
   if sshpass -p "${DEST_PASS}" ssh \
       "${SSH_OPTS_BASE[@]}" \
       -o PreferredAuthentications=password \
@@ -100,7 +105,7 @@ fi
 
 echo "=== Starting rsync to ${DEST} (port ${DEST_PORT}) ==="
 
-# rsync opts — NOTE: no --numeric-ids (let names map to B's users)
+# Rsync opts — NOTE: we keep ownership mapping by NAME (no --numeric-ids)
 RSYNC_BASE_OPTS=(
   -aAXH
   --delete
@@ -122,9 +127,64 @@ EXCLUDES=(
   --exclude=/var/cache/* --exclude=/var/tmp/* --exclude=/var/log/journal/*
 )
 
+# Run rsync
 rsync "${RSYNC_BASE_OPTS[@]}" -e "$(printf '%q ' "${RSYNC_SSH[@]}")" \
   "${EXCLUDES[@]}" \
   / "${DEST}":/
 
+# Post: minimal Docker first‑aid (no installs), then optional compose bring-up
+read -r -d '' POST <<'EOF'
+set -e
+LOG=/var/log/server-clone-post.log
+{
+  echo "== $(date -Is) post-clone start =="
+
+  systemctl daemon-reload || true
+
+  # If docker.service exists, try to start as-is
+  if systemctl list-unit-files --type=service | grep -q '^docker\.service'; then
+    echo "[docker] starting as-is"
+    mkdir -p /var/lib/docker
+    systemctl enable --now docker 2>/dev/null || systemctl start docker || true
+    if ! systemctl is-active --quiet docker; then
+      echo "[docker] first-aid: clear stale pid/sock, ensure containerd"
+      systemctl stop docker 2>/dev/null || true
+      rm -f /var/run/docker.pid /var/run/docker.sock 2>/dev/null || true
+      if systemctl list-unit-files --type=service | grep -q '^containerd\.service'; then
+        systemctl enable --now containerd 2>/dev/null || systemctl restart containerd || true
+      fi
+      systemctl start docker || true
+    fi
+  else
+    echo "[docker] docker.service not present; skipping (no installs performed)"
+  fi
+
+  # Compose bring-up only if docker is running AND compose plugin exists
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    for y in \
+      /opt/*/docker-compose.yml \
+      /srv/*/docker-compose.yml \
+      /root/*/docker-compose.yml \
+      /var/*/docker-compose.yml ; do
+      [ -f "$y" ] || continue
+      echo "compose up: $y"
+      ( cd "$(dirname "$y")" && docker compose up -d ) || true
+    done
+  else
+    echo "[compose] not available or docker not running; skipping"
+  fi
+
+  echo "== $(date -Is) post-clone end =="
+} >>"$LOG" 2>&1
+EOF
+
+# Run remote post
+if [[ -n "${DEST_PASS}" ]]; then
+  sshpass -p "${DEST_PASS}" ssh -o StrictHostKeyChecking=accept-new "${DEST}" "${POST}"
+else
+  "${RSYNC_SSH[@]}" "${DEST}" "${POST}"
+fi
+
 echo
-echo "=== Clone complete. Server B login stays unchanged. Reboot ${DEST_IP} and test your services. ==="
+echo "=== Clone complete. Server B login stays unchanged. ==="
+echo "If Marzban still says 'docker daemon not running', check /var/log/server-clone-post.log on B to see why docker refused to start (no installs were performed)."
