@@ -75,7 +75,7 @@ Once the sync is complete, the script will provide you with a single, simple com
 3.  **Choose a Recipe:** Select the application you are migrating (e.g., "Marzban"). This tells the script which specific directories to sync.
 4.  **Choose to Clone Firewall:** Decide if you want to also clone your firewall rules. The default is "No" for maximum safety.
 5.  **Automated Preparation & Sync:** The script runs its pre-flight checks, prepares Server B, and synchronizes the application data.
-6.  **Manual Activation:** Log into Server B and run the final startup command provided by the script (e.g, marzban/marzneshin up). This ensures you have the final control and can verify the result.
+6.  **Manual Activation:** Log into Server B and run the final startup command provided by the script (e.g, marzban up). This ensures you have the final control and can verify the result.
 
 * * *
 
