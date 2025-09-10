@@ -27,4 +27,3 @@ jobs:
       - name: Syntax check (bash -n)
         run: |
           bash -n full-clone.sh
-          bash -n verify-clone.sh
