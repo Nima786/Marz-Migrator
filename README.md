@@ -1,7 +1,7 @@
 # server-clone-rsync
 
 A simple and optimized rsync-based tool to **Marz-Migrator** (files, configs, Docker, databases) from one VPS to another with **minimal downtime**.  
-It supports **SSH key or password authentication**, automatically handles `.ppk` keys, and includes a verification script.
+It supports **SSH key or password authentication**, automatically handles `.ppk` keys.
 
 ## ✨ Features
 - Clone entire server **A → B** with one command.
