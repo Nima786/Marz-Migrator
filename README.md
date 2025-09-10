@@ -1,6 +1,6 @@
 # server-clone-rsync
 
-A simple and optimized rsync-based tool to **fully clone Ubuntu servers** (files, configs, Docker, databases) from one VPS to another with **minimal downtime**.  
+A simple and optimized rsync-based tool to **Marz-Migrator** (files, configs, Docker, databases) from one VPS to another with **minimal downtime**.  
 It supports **SSH key or password authentication**, automatically handles `.ppk` keys, and includes a verification script.
 
 ## ✨ Features
