@@ -54,7 +54,7 @@ Once the sync is complete, the script will provide you with a single, simple com
 📋 Requirements
 ---------------
 
-*   Two Ubuntu/Debian servers (source and destination).
+*   Two Ubuntu/Debian servers with the same **Architecture** (source and destination).
 *   Root (or sudo) access on both servers.
 *   `rsync` and `curl` installed on the source server.
 *   `sshpass` installed on the source if using password authentication.
