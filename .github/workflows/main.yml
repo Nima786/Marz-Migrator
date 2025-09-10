@@ -22,8 +22,8 @@ jobs:
       - name: Run shellcheck (lint)
         run: |
           # Lint all shell scripts at repo root; expand or tweak the glob if needed
-          shellcheck -x full-clone.sh
+          shellcheck -x Marz.Migrator.sh
 
       - name: Syntax check (bash -n)
         run: |
-          bash -n full-clone.sh
+          bash -n Marz.Migrator.sh
