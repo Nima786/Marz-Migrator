@@ -28,12 +28,6 @@ The script will:
 2. Ask for **password** (if using password auth). If left blank, it will ask for **SSH key path** (default: `~/.ssh/id_ed25519`).
 3. Clone the entire filesystem from Server A → Server B while keeping B’s network/identity intact.
 
-After migration, you can verify Server B with:
-
-```bash
-bash <(curl -s https://raw.githubusercontent.com/Nima786/server-clone-rsync/main/verify-clone.sh)
-```
-
 ## 📋 Requirements
 - Ubuntu/Debian source and destination servers.
 - Root (or sudo) access on both servers.
