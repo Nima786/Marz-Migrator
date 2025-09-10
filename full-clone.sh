@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# server-clone-rsync - The Ultimate Docker-Aware Migration Script
-# - Preserves the destination kernel environment to ensure Docker compatibility.
-# - Clones filesystems while preserving destination SSH, network, and auth.
-# - Performs a post-sync self-repair and startup of Docker and Marzban services.
+# server-clone-rsync - The Ultimate "Intelligent Sync" Migration Script (v6 - FINAL)
+# - METHODOLOGY: A professional-grade tool that prepares the destination, runs pre-flight
+#   checks, surgically syncs application state, and provides final activation instructions.
+# - FIX: Pre-flight disk space check is now robust and handles non-existent paths.
 set -euo pipefail
 
-echo "=== The Ultimate Docker-Aware Server Clone Script ==="
+echo "=== The Ultimate Docker Application Migration Script ==="
 
 # ---- helpers ----
 confirm_install() {
@@ -26,25 +26,18 @@ confirm_install rsync rsync
 confirm_install openssh-client ssh
 
 # ---- inputs ----
-read -rp "Destination host/IP: " DEST_IP
+read -rp "Destination server IP: " DEST_IP
 read -rp "Destination SSH port (default: 22): " DEST_PORT; DEST_PORT=${DEST_PORT:-22}
-read -rp "Destination username (default: root): " DEST_USER; DEST_USER=${DEST_USER:-root}
+read -rp "Destination username (default: root): " DEST_USER; DEST_USER=${USER:-root}
 read -srp "Password for ${DEST_USER}@${DEST_IP} (leave empty to use SSH key): " DEST_PASS; echo
 DEST="${DEST_USER}@${DEST_IP}"
 
 # ---- SSH setup ----
-SSH_OPTS_BASE=(
-  -T -x -p "${DEST_PORT}"
-  -o Compression=no
-  -o TCPKeepAlive=yes
-  -o ServerAliveInterval=30
-  -o StrictHostKeyChecking=accept-new
-  -c aes128-gcm@openssh.com
+SSH_OPTS=(
+  -p "${DEST_PORT}" -T -x
+  -o Compression=no -o TCPKeepAlive=yes -o ServerAliveInterval=30
+  -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com
 )
-
-# Handle known_hosts
-ssh-keygen -R "[${DEST_IP}]:${DEST_PORT}" >/dev/null 2>&1 || true
-ssh-keyscan -p "${DEST_PORT}" -t ed25519 "${DEST_IP}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
 TMP_KEY_PATH=""
 cleanup_key() {
@@ -56,154 +49,172 @@ trap cleanup_key EXIT
 
 # ---- Authentication setup ----
 SSH_CMD=()
+KEY_PATH=""
 if [[ -n "${DEST_PASS}" ]]; then
   confirm_install sshpass sshpass
-  SSH_CMD=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS_BASE[@]}")
+  SSH_CMD=(sshpass -p "${DEST_PASS}" ssh "${SSH_OPTS[@]}")
 else
   read -rp "SSH private key path (default: ~/.ssh/id_ed25519): " KEY_PATH
   KEY_PATH=${KEY_PATH:-~/.ssh/id_ed25519}
   if [[ "${KEY_PATH}" == *.ppk ]]; then
     confirm_install putty-tools puttygen
-    TMP_KEY_PATH="/root/rsync_key_$$"
-    echo "Converting PPK to OpenSSH format..."
+    TMP_KEY_PATH="/tmp/rsync_key_$$"
+    echo "Converting PPK -> OpenSSH..."
     puttygen "${KEY_PATH}" -O private-openssh -o "${TMP_KEY_PATH}"
     chmod 600 "${TMP_KEY_PATH}"
     KEY_PATH="${TMP_KEY_PATH}"
   fi
   [[ -f "${KEY_PATH}" ]] || { echo "✗ SSH key not found: ${KEY_PATH}"; exit 1; }
   chmod 600 "${KEY_PATH}" 2>/dev/null || true
-  SSH_CMD=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS_BASE[@]}")
+  SSH_CMD=(ssh -i "${KEY_PATH}" -o IdentitiesOnly=yes "${SSH_OPTS[@]}")
 fi
 
 # ---- Remote execution function and connectivity check ----
 run_remote() {
-  # Wraps the command in 'bash -c' for robust execution
   "${SSH_CMD[@]}" "${DEST}" "bash -c '$1'"
 }
 
 echo "=== Testing SSH connectivity ==="
 run_remote "echo '✓ SSH connection successful'" || { echo "✗ SSH connection failed"; exit 1; }
 
-# ---- Pre-sync preparation on Destination ----
-echo "=== Preparing destination server ==="
-# Stop services on destination to prevent file-in-use errors
-run_remote "systemctl stop docker containerd &>/dev/null || true"
-echo "✓ Docker services stopped on destination."
-
-# ---- Rsync Execution ----
-echo "=== Starting rsync migration (this may take a while) ==="
-
-RSYNC_OPTS=(
-  -aAXH
-  --numeric-ids
-  --delete
-  --force
-  --delete-excluded
-  --whole-file
-  --delay-updates
-  "--info=stats2,progress2"
-)
-
-# Robust excludes to prevent breaking the destination OS
-EXCLUDES=(
-  # System runtime & mounts
-  --exclude=/dev/** --exclude=/proc/** --exclude=/sys/** --exclude=/run/** --exclude=/tmp/**
-  --exclude=/mnt/** --exclude=/media/** --exclude=/lost+found --exclude=/swapfile*
-
-  # Boot files & KERNEL ENVIRONMENT (CRITICAL FOR DOCKER COMPATIBILITY)
-  --exclude=/boot/**
-  --exclude=/lib/modules/**
-  --exclude=/lib/firmware/**
-
-  # Network and system identity (keep destination's settings)
-  --exclude=/etc/network/** --exclude=/etc/netplan/** --exclude=/etc/hostname
-  --exclude=/etc/hosts --exclude=/etc/resolv.conf --exclude=/etc/fstab
-  --exclude=/etc/cloud/** --exclude=/var/lib/cloud/**
-  --exclude=/etc/machine-id --exclude=/var/lib/dbus/machine-id
-
-  # SSH server (keep destination's SSH service fully intact)
-  --exclude=/etc/ssh/**
-
-  # User auth (keep destination's users)
-  --exclude=/etc/shadow* --exclude=/etc/passwd* --exclude=/etc/group* --exclude=/etc/gshadow*
-  --exclude=/root/.ssh/** --exclude=/home/*/.ssh/**
-
-  # Logs and cache
-  --exclude=/var/log/** --exclude=/var/cache/** --exclude=/var/tmp/**
-)
-
-# Execute rsync
-rsync "${RSYNC_OPTS[@]}" -e "$(printf '%q ' "${SSH_CMD[@]}")" \
-  "${EXCLUDES[@]}" \
-  / "${DEST}":/
-
-# ---- Post-sync Self-Repair on Destination ----
-echo "=== Running post-sync setup and repair on destination ==="
-
-# Using a heredoc for the remote script is cleaner and safer
-run_remote "$(cat <<'EOF'
-set -e
-echo "--- Post-sync system setup ---"
-
-# Reload systemd to recognize any new/changed service files
-systemctl daemon-reload
-
-# Reset any services that might have failed during the process
-systemctl reset-failed docker.service docker.socket containerd.service &>/dev/null || true
-
-# Start Docker's dependencies first
-if systemctl list-unit-files | grep -q "^containerd.service"; then
-  echo "Starting containerd..."
-  systemctl enable --now containerd.service
-fi
-sleep 3
-
-# Start Docker itself
-echo "Starting Docker services..."
-systemctl enable --now docker.socket
-sleep 2
-systemctl enable --now docker.service
-
-# Wait for Docker to be fully ready
-echo "Waiting for Docker daemon..."
-timeout=60
-while [ $timeout -gt 0 ]; do
-  if docker info &>/dev/null; then
-    echo "✓ Docker is ready!"
-    break
-  fi
-  sleep 2
-  timeout=$((timeout - 2))
+# ---- MENU: CHOOSE APPLICATION RECIPE ----
+APP_STATE_PATHS=()
+POST_CLONE_INSTRUCTIONS=""
+echo "Please choose the application type to migrate:"
+select app_type in "Marzban" "Generic Docker App (manual path entry)" "Exit"; do
+  case $app_type in
+    "Marzban")
+      APP_STATE_PATHS=(
+        "/opt/marzban"
+        "/var/lib/marzban"
+        "/var/lib/docker/volumes"
+        "/usr/local/bin/marzban"
+      )
+      POST_CLONE_INSTRUCTIONS="Log into the destination server and run: \`marzban up\`"
+      break
+      ;;
+    "Generic Docker App (manual path entry)")
+      echo "Enter the absolute paths to sync, separated by spaces."
+      echo "Example: /opt/myapp /var/lib/docker/volumes"
+      read -rp "Paths to sync: " -a APP_STATE_PATHS
+      POST_CLONE_INSTRUCTIONS="Log into the destination server, \`cd\` to your application's directory, and run: \`docker compose up -d\`"
+      break
+      ;;
+    "Exit")
+      exit 0
+      ;;
+    *)
+      echo "Invalid option. Please try again."
+      ;;
+  esac
 done
 
+# ---- INTERACTIVE FIREWALL CLONING ----
+FIREWALL_STATE_PATHS=(
+  "/etc/ufw"
+  "/etc/nftables.conf"
+  "/etc/iptables"
+  "/etc/firewalld"
+)
+read -rp "Clone firewall configuration? (Risky if IP-specific rules exist) [y/N]: " CLONE_FIREWALL
+CLONE_FIREWALL=${CLONE_FIREWALL:-N}
+if [[ "$CLONE_FIREWALL" =~ ^[Yy]$ ]]; then
+  echo "INFO: Firewall state will be cloned."
+  APP_STATE_PATHS+=("${FIREWALL_STATE_PATHS[@]}")
+fi
+
+# ---- PRE-FLIGHT CHECKS ----
+echo "=== Running Pre-flight Checks ==="
+# Check 1: Source Docker is running
 if ! docker info &>/dev/null; then
-  echo "✗ Docker failed to start properly. Check logs:"
-  journalctl -u docker.service --no-pager -n 20
+  echo "✗ FATAL: Docker is not running on the source server. Please start it and try again."
   exit 1
 fi
+echo "✓ Source Docker is running."
 
-# Start Marzban if its directory exists
-if [ -d "/opt/marzban" ]; then
-  echo "--- Starting Marzban services ---"
-  cd /opt/marzban
-  if [ -f "docker-compose.yml" ] || [ -f "compose.yml" ]; then
-    echo "Starting Marzban containers..."
-    docker compose up -d --remove-orphans
-    sleep 10
-    echo "--- Marzban Status ---"
-    docker compose ps
-  else
-    echo "⚠ No docker-compose.yml found in /opt/marzban"
-  fi
-else
-  echo "✓ No Marzban installation found, skipping."
+# Check 2: Destination has enough disk space (ROBUST VERSION)
+echo "Calculating required disk space..."
+EXISTING_PATHS=()
+for path in "${APP_STATE_PATHS[@]}"; do
+    if [ -e "${path}" ]; then
+        EXISTING_PATHS+=("${path}")
+    fi
+done
+
+SOURCE_SIZE_KB=0
+if [ ${#EXISTING_PATHS[@]} -gt 0 ]; then
+    SOURCE_SIZE_KB=$(du -sk "${EXISTING_PATHS[@]}" | tail -n1 | awk '{print $1}')
 fi
 
-echo "--- Setup completed successfully ---"
+DEST_FREE_KB=$(run_remote "df -k /" | tail -n1 | awk '{print $4}')
+REQUIRED_KB=$((SOURCE_SIZE_KB * 12 / 10)) # Add 20% buffer
+
+if [[ "${REQUIRED_KB}" -gt "${DEST_FREE_KB}" ]]; then
+  echo "✗ FATAL: Not enough disk space on destination."
+  echo "  Required: ~$((REQUIRED_KB / 1024)) MB"
+  echo "  Available: ~$((DEST_FREE_KB / 1024)) MB"
+  exit 1
+fi
+echo "✓ Destination has enough disk space."
+
+# ---- PHASE 1: PREPARE DESTINATION ----
+echo "=== Phase 1: Preparing Destination Environment ==="
+run_remote "$(cat <<'EOF'
+set -e
+echo "--- Stopping any running services..."
+systemctl stop docker containerd &>/dev/null || true
+echo "--- Installing a clean, native Docker engine..."
+apt-get update
+apt-get install -y ca-certificates curl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+echo "✓ Docker environment is ready."
 EOF
 )"
 
+# ---- PHASE 2: SURGICAL STATE SYNCHRONIZATION ----
+echo "=== Phase 2: Synchronizing Application State (Safe Method) ==="
+RSYNC_OPTS=(
+  -aAXH --numeric-ids --delete --force --whole-file --delay-updates "--info=stats2,progress2"
+)
+RSYNC_SSH_CMD_STR=""
+if [[ -n "${DEST_PASS}" ]]; then
+  RSYNC_SSH_CMD_STR="sshpass -p '${DEST_PASS}' ssh $(printf '%q ' "${SSH_OPTS[@]}")"
+else
+  RSYNC_SSH_CMD_STR="ssh -i '${KEY_PATH}' -o IdentitiesOnly=yes $(printf '%q ' "${SSH_OPTS[@]}")"
+fi
+
+for path in "${EXISTING_PATHS[@]}"; do
+  echo "--- Synchronizing ${path} ---"
+  if [ -d "${path}" ]; then
+    rsync "${RSYNC_OPTS[@]}" -e "${RSYNC_SSH_CMD_STR}" "${path}/" "${DEST}:${path}/"
+  else
+    rsync "${RSYNC_OPTS[@]}" -e "${RSYNC_SSH_CMD_STR}" "${path}" "${DEST}:${path}"
+  fi
+done
+
+# ---- PHASE 3: FINAL INSTRUCTIONS ----
 echo
-echo "=== Migration Complete! ==="
-echo "Destination server: ${DEST_IP}:${DEST_PORT}"
-echo "It is recommended to reboot the destination server now: ssh ${DEST_USER}@${DEST_IP} -p ${DEST_PORT} 'reboot'"
+echo "================================================="
+echo "===             MIGRATION COMPLETE            ==="
+echo "================================================="
+echo
+echo "The destination server is prepared and all data has been synchronized."
+echo
+echo "--- YOUR FINAL STEP (MANDATORY) ---"
+echo
+echo "1. Log into the destination server:"
+echo "   ssh ${DEST_USER}@${DEST_IP} -p ${DEST_PORT}"
+echo
+echo "2. Check that the application's configuration file exists:"
+echo "   ls -l /opt/marzban/docker-compose.yml"
+echo
+echo "3. Run the application's startup command:"
+echo "   ${POST_CLONE_INSTRUCTIONS}"
+echo
+echo "This will pull fresh, non-corrupted images and start your panel with all your cloned data."
+echo
