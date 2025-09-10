@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# server-clone-rsync - The Ultimate "Intelligent Sync" Migration Script (v6 - FINAL)
-# - METHODOLOGY: A professional-grade tool that prepares the destination, runs pre-flight
+# Docker Application Migration Script - (v7 - FINAL)
+# - A professional-grade tool with a menu for different Dockerized applications.
+# - METHODOLOGY: Prepares the destination with a native Docker engine, runs pre-flight
 #   checks, surgically syncs application state, and provides final activation instructions.
-# - FIX: Pre-flight disk space check is now robust and handles non-existent paths.
 set -euo pipefail
 
 echo "=== The Ultimate Docker Application Migration Script ==="
@@ -80,8 +80,8 @@ run_remote "echo '✓ SSH connection successful'" || { echo "✗ SSH connection 
 # ---- MENU: CHOOSE APPLICATION RECIPE ----
 APP_STATE_PATHS=()
 POST_CLONE_INSTRUCTIONS=""
-echo "Please choose the application type to migrate:"
-select app_type in "Marzban" "Generic Docker App (manual path entry)" "Exit"; do
+echo "Please choose the Docker-based application to migrate:"
+select app_type in "Marzban" "Marzneshin" "Exit"; do
   case $app_type in
     "Marzban")
       APP_STATE_PATHS=(
@@ -93,11 +93,14 @@ select app_type in "Marzban" "Generic Docker App (manual path entry)" "Exit"; do
       POST_CLONE_INSTRUCTIONS="Log into the destination server and run: \`marzban up\`"
       break
       ;;
-    "Generic Docker App (manual path entry)")
-      echo "Enter the absolute paths to sync, separated by spaces."
-      echo "Example: /opt/myapp /var/lib/docker/volumes"
-      read -rp "Paths to sync: " -a APP_STATE_PATHS
-      POST_CLONE_INSTRUCTIONS="Log into the destination server, \`cd\` to your application's directory, and run: \`docker compose up -d\`"
+    "Marzneshin")
+      APP_STATE_PATHS=(
+        "/opt/marzneshin"
+        "/var/lib/marzneshin"
+        "/var/lib/docker/volumes"
+        "/usr/local/bin/marzneshin"
+      )
+      POST_CLONE_INSTRUCTIONS="Log into the destination server and run: \`marzneshin up\`"
       break
       ;;
     "Exit")
@@ -140,12 +143,10 @@ for path in "${APP_STATE_PATHS[@]}"; do
         EXISTING_PATHS+=("${path}")
     fi
 done
-
 SOURCE_SIZE_KB=0
 if [ ${#EXISTING_PATHS[@]} -gt 0 ]; then
     SOURCE_SIZE_KB=$(du -sk "${EXISTING_PATHS[@]}" | tail -n1 | awk '{print $1}')
 fi
-
 DEST_FREE_KB=$(run_remote "df -k /" | tail -n1 | awk '{print $4}')
 REQUIRED_KB=$((SOURCE_SIZE_KB * 12 / 10)) # Add 20% buffer
 
@@ -211,7 +212,11 @@ echo "1. Log into the destination server:"
 echo "   ssh ${DEST_USER}@${DEST_IP} -p ${DEST_PORT}"
 echo
 echo "2. Check that the application's configuration file exists:"
-echo "   ls -l /opt/marzban/docker-compose.yml"
+if [[ "$app_type" == "Marzban" ]]; then
+  echo "   ls -l /opt/marzban/docker-compose.yml"
+elif [[ "$app_type" == "Marzneshin" ]]; then
+  echo "   ls -l /opt/marzneshin/docker-compose.yml"
+fi
 echo
 echo "3. Run the application's startup command:"
 echo "   ${POST_CLONE_INSTRUCTIONS}"
