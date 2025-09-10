@@ -1,72 +1,85 @@
-# Marz-Migrator
+Marz-Migrator
+=============
 
-A simple and optimized rsync-based tool to **Marz-Migrator** (files, configs, Docker, databases) from one VPS to another with **minimal downtime**.  
-It supports **SSH key or password authentication**, automatically handles `.ppk` keys.
+An intelligent, one-click migration script for Docker-based proxy panels like **Marzban** and **Marzneshin**. It safely clones your panel's complete state from one VPS to another with minimal downtime.
 
-## ✨ Features
-- Clone entire server **A → B** with one command.
-- Works with **SSH password or key-based authentication**.
-- **Safe excludes**: keeps Server B’s networking, hostname, and SSH host keys intact.
-- Optimized for **1Gbps+ links** (fast cipher, no compression).
-- Supports `.ppk` keys (auto-converts to OpenSSH format if `puttygen` is installed). 
+Instead of a risky, full-server clone, this tool uses a robust **"Surgical Sync & Rebuild"** methodology. It prepares the destination server with a native Docker engine, surgically syncs only the application's code and data volumes, and then provides a simple final command to rebuild the container state, guaranteeing a clean, non-corrupted, and perfectly functional migration.
+
+It supports both **SSH key** and **password authentication** and automatically handles `.ppk` keys.
+
+✨ Core Features
+---------------
+
+*   **Intelligent Migration:** Avoids OS corruption and kernel incompatibilities by respecting the destination server's environment.
+*   **Application-Aware:** Includes "recipes" for Marzban and Marzneshin to sync the exact files and directories needed for a perfect clone.
+*   **Safe By Design:** Includes pre-flight checks for Docker status and available disk space to prevent failed migrations.
+*   **Optional Firewall Cloning:** Gives you the expert choice to clone your existing firewall state (UFW, nftables, etc.) for a true one-click setup.
+*   **User-Friendly:** Supports SSH passwords or keys, with automatic `.ppk` conversion (requires `putty-tools`).
+
+* * *
 
 ⚠️ Disclaimer
 -------------
 
-This script directly clones one server onto another using `rsync`. While it has been tested, **always create a full backup of your source server** before running it. If anything goes wrong (network issues, hardware failure, or user mistakes), you can lose data without a backup.
+This script is a powerful tool designed to prepare a destination server and synchronize application data. While it is built with multiple safety checks, **always have a full backup of your source server** before proceeding. Data loss can occur due to network issues, misconfiguration, or other unforeseen problems.
 
-Use this tool at your own risk — double-check that you have recovery options before proceeding.
-## 🚀 Quick Start
-Run this on **Server A** (the source server):
+Use this tool at your own risk. Double-check your server IPs and have a recovery plan before starting the migration.
 
-```bash
-bash <(curl -s https://raw.githubusercontent.com/Nima786/Marz-Migrator/main/full-clone.sh)
-```
+* * *
 
-The script will:
-1. Ask for **Server B IP** and **username**.
-2. Ask for **password** (if using password auth). If left blank, it will ask for **SSH key path** (default: `~/.ssh/id_ed25519`).
-3. Clone the entire filesystem from Server A → Server B while keeping B’s network/identity intact.
+🚀 Quick Start: The 3-Phase Migration
+-------------------------------------
 
-## 📋 Requirements
-- Ubuntu/Debian source and destination servers.
-- Root (or sudo) access on both servers.
-- `rsync` installed on both servers.
-- `putty-tools` installed if you want to use `.ppk` keys.
+Run this single command on **Server A** (the source server):
 
-Install requirements:
-```bash
-apt update && apt install -y rsync putty-tools sshpass
-```
-📖 How to use this script
--------------------------
-
-1.  **Prepare your servers**
-    *   Make sure you can SSH into both Server A (source) and Server B (destination).
-    *   If you use SSH keys:
-        *   Upload **Server B’s private key** file (e.g. `private-key.ppk` or `id_ed25519`) into the **root directory of Server A**.
-        *   This allows the script to authenticate to Server B during the clone.
-2.  **On Server A (the source server)**, run the clone script:
-    
-        bash <(curl -s https://raw.githubusercontent.com/Nima786/Marz-Migrator/main/full-clone.sh)
-    
-3.  The script will ask for:
-    *   Destination server **IP**
-    *   Destination **username** (default: `root`)
-    *   Either:
-        *   **Password** (if you use password auth), or
-        *   Leave blank → provide the path to the **SSH private key** you uploaded (e.g. `/root/private-key.ppk`)
-4.  The script will then **rsync all data from Server A → Server B**, while skipping:
-    *   Networking configs (to keep B’s IP/hostname working)
-    *   Machine identity files
-    *   Temporary/system files
+    bash <(curl -s https://raw.githubusercontent.com/Nima786/Marz-Migrator/main/Marz-Migrator.sh)
     
 
-## ⚠️ Notes
-- This tool is designed for **same-architecture clones (x86→x86, arm→arm)**.  
-  For cross-architecture migrations, exclude system binaries (`/usr`, `/lib`) and reinstall packages natively on Server B.
-- Always test services on Server B before switching DNS or clients.
-- Keep Server A as fallback for a few days after migration.
+The script will guide you through a 3-phase process:
 
-## 📜 License
+#### Phase 1: Prepare Destination
+
+The script connects to Server B and uses its native package manager to install a clean, compatible Docker engine. This completely avoids the kernel and library conflicts that cause traditional `rsync` clones to fail.
+
+#### Phase 2: Surgical Sync
+
+It then surgically copies only the essential state of your chosen application (e.g., Marzban's code, configs, and data volumes) from Server A to Server B.
+
+#### Phase 3: Final Activation (Manual Step)
+
+Once the sync is complete, the script will provide you with a single, simple command to run on Server B. This command tells the new Docker engine to pull fresh container images and start them with your cloned data, finalizing the migration.
+
+* * *
+
+📋 Requirements
+---------------
+
+*   Two Ubuntu/Debian servers (source and destination).
+*   Root (or sudo) access on both servers.
+*   `rsync` and `curl` installed on the source server.
+*   `sshpass` installed on the source if using password authentication.
+*   `putty-tools` installed on the source if using `.ppk` keys.
+
+#### Quick Install on Source Server:
+
+    apt update && apt install -y rsync curl sshpass putty-tools
+    
+
+* * *
+
+📖 How It Works
+---------------
+
+1.  **Run the Script on Server A:** The script is initiated from the source server you want to clone.
+2.  **Enter Destination Details:** Provide Server B's IP, SSH port, and credentials (password or SSH key path).
+3.  **Choose a Recipe:** Select the application you are migrating (e.g., "Marzban"). This tells the script which specific directories to sync.
+4.  **Choose to Clone Firewall:** Decide if you want to also clone your firewall rules. The default is "No" for maximum safety.
+5.  **Automated Preparation & Sync:** The script runs its pre-flight checks, prepares Server B, and synchronizes the application data.
+6.  **Manual Activation:** Log into Server B and run the final startup command provided by the script. This ensures you have the final control and can verify the result.
+
+* * *
+
+📜 License
+----------
+
 This project is licensed under the MIT License.
