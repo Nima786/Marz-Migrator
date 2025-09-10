@@ -8,7 +8,6 @@ It supports **SSH key or password authentication**, automatically handles `.ppk`
 - Works with **SSH password or key-based authentication**.
 - **Safe excludes**: keeps Server B’s networking, hostname, and SSH host keys intact.
 - Optimized for **1Gbps+ links** (fast cipher, no compression).
-- Includes **verify script** to check if Server B is healthy after migration.
 - Supports `.ppk` keys (auto-converts to OpenSSH format if `puttygen` is installed).
 
 ⚠️ Disclaimer
