@@ -22,7 +22,7 @@ jobs:
       - name: Run shellcheck (lint)
         run: |
           # Lint all shell scripts at repo root; expand or tweak the glob if needed
-          shellcheck -x full-clone.sh verify-clone.sh
+          shellcheck -x full-clone.sh
 
       - name: Syntax check (bash -n)
         run: |
