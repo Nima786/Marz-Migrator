@@ -48,7 +48,7 @@ apt update && apt install -y rsync putty-tools sshpass
         *   This allows the script to authenticate to Server B during the clone.
 2.  **On Server A (the source server)**, run the clone script:
     
-        bash <(curl -s https://raw.githubusercontent.com/Nima786/server-clone-rsync/main/full-clone.sh)
+        bash <(curl -s https://raw.githubusercontent.com/Nima786/Marz-Migrator/main/full-clone.sh)
     
 3.  The script will ask for:
     *   Destination server **IP**
