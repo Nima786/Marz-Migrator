@@ -21,7 +21,7 @@ Use this tool at your own risk — double-check that you have recovery options b
 Run this on **Server A** (the source server):
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/Nima786/server-clone-rsync/main/full-clone.sh)
+bash <(curl -s https://raw.githubusercontent.com/Nima786/Marz-Migrator/main/full-clone.sh)
 ```
 
 The script will:
@@ -67,21 +67,7 @@ apt update && apt install -y rsync putty-tools sshpass
     *   Networking configs (to keep B’s IP/hostname working)
     *   Machine identity files
     *   Temporary/system files
-5.  After it finishes, verify the migration by running:
     
-        bash <(curl -s https://raw.githubusercontent.com/Nima786/server-clone-rsync/main/verify-clone.sh)
-    
-    This will check:
-    
-    *   SSH reachability
-    *   Systemd health
-    *   Docker, MySQL/MariaDB, Nginx/Apache status
-    *   Directory sizes between A and B
-    *   Spot-check hashes of a few binaries
-6.  Once verified:
-    *   Test apps on Server B (open its IP in browser / check services).
-    *   Update DNS (or client configs) to point to Server B’s IP.
-    *   Keep Server A as fallback for a few days, then retire it safely.
 
 ## ⚠️ Notes
 - This tool is designed for **same-architecture clones (x86→x86, arm→arm)**.  
